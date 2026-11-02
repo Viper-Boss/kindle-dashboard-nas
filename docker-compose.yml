@@ -1,0 +1,87 @@
+services:
+  kindle-dashboard:
+    build: .
+    container_name: kindle-dashboard
+    restart: always
+    depends_on:
+      mihomo:
+        condition: service_healthy
+    ports:
+    - 8787:8787
+    env_file:
+    - .env
+    environment:
+      TZ: Asia/Shanghai
+      PORT: '8787'
+      DASHBOARD_WIDTH: '600'
+      DASHBOARD_HEIGHT: '800'
+      CACHE_SECONDS: '300'
+    volumes:
+    - ./data:/data
+    - ./proxy:/proxy
+    - ./app.py:/app/app.py:ro
+    - ./proxy_admin.py:/app/proxy_admin.py:ro
+  mihomo:
+    image: metacubex/mihomo:latest
+    container_name: kindle-dashboard-proxy
+    restart: always
+    command:
+    - -f
+    - /root/.config/mihomo/config.yaml
+    healthcheck:
+      test:
+      - CMD-SHELL
+      - grep -qi ':1ED2' /proc/net/tcp /proc/net/tcp6
+      interval: 5s
+      timeout: 3s
+      retries: 24
+      start_period: 5s
+    volumes:
+    - ./proxy:/root/.config/mihomo
+    ports:
+    - ${NAS_BIND_IP:-192.168.120.200}:7890:7890/tcp
+    - ${NAS_BIND_IP:-192.168.120.200}:7891:7891/tcp
+    - ${NAS_BIND_IP:-192.168.120.200}:7891:7891/udp
+    - ${NAS_BIND_IP:-192.168.120.200}:7892:7892/tcp
+  mtproto:
+    image: nas-mtproto-local:20261011
+    container_name: nas-mtproto
+    restart: always
+    working_dir: /app
+    depends_on:
+      mihomo:
+        condition: service_healthy
+    ports:
+    - ${NAS_BIND_IP:-192.168.120.200}:8443:8443/tcp
+    - ${WHATSAPP_BIND_IP:-0.0.0.0}:5222:5222/tcp
+    - "${WHATSAPP_IPV6_BIND_IP:-[::]}:5222:5222/tcp"
+    - ${WHATSAPP_BIND_IP:-0.0.0.0}:7777:7777/tcp
+    - "${WHATSAPP_IPV6_BIND_IP:-[::]}:7777:7777/tcp"
+    volumes:
+    - ./mtproto:/app:ro
+    read_only: true
+    tmpfs:
+    - /tmp
+    cap_drop:
+    - ALL
+    security_opt:
+    - no-new-privileges:true
+    environment:
+      PYTHONUNBUFFERED: '1'
+      PYTHONDONTWRITEBYTECODE: '1'
+    command:
+    - python
+    - mtprotoproxy.py
+    - config.py
+    healthcheck:
+      test:
+      - CMD
+      - python
+      - -c
+      - import socket; socket.create_connection(("127.0.0.1",8443),2).close()
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+    build:
+      context: ./mtproto
