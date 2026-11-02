@@ -37,3 +37,5 @@ sudo python3 scripts/install-maintenance.py --project "$PWD" --current-commit <�
 ## 网页登录
 
 打开 /admin 后自动跳转 /login，支持密码显示、错误提示、7 天保持登录和退出登录。会话令牌仅保存在 HttpOnly、SameSite=Strict Cookie；数据库只保留其 SHA-256 摘要，退出立即撤销，更换 .env 中账号密码会使已有会话失效。默认会话 12 小时；失败登录按来源 IP 限制为每 15 分钟 10 次。历史脚本主动发送 Basic Authorization 仍受原账号验证，但所有接口均不发送 WWW-Authenticate，浏览器页面仅使用会话登录。登录账号沿用 NAS 私有 .env 中 ADMIN_USERNAME / ADMIN_PASSWORD，不进入公开源码。通过 HTTPS 反向代理时可设置 COOKIE_SECURE=1。
+
+构建依赖与镜像扫描先尝试直连，网络失败后再用现有代理重试，始终保留证书验证。迁移包不携带登录会话数据库，迁移后使用原账号重新登录。

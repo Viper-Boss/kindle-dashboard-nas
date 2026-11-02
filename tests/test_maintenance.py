@@ -103,6 +103,19 @@ class WorkerInputTests(unittest.TestCase):
                 self.assertEqual(result['state'],'failed')
             with self.assertRaises(ValueError):worker.process({'id':'b'*32,'kind':'upgrade','state':'queued','requestedAt':'now','command':'anything'})
 
+    def test_build_tries_direct_then_existing_proxy_without_disabling_tls(self):
+        module=self.worker_module()
+        with tempfile.TemporaryDirectory() as folder,patch.dict(os.environ):
+            root=Path(folder);project=root/'project';project.mkdir();(project/'.env').write_text('ADMIN_PASSWORD=test-password\n')
+            worker=module.Worker(project,root/'private',maintenance)
+            command=['docker','build','--build-arg','HTTPS_PROXY=http://proxy:7890','.']
+            with patch.object(worker,'run',side_effect=[RuntimeError('transport failed'),None]) as run:
+                worker.run_network(command,env={'HTTPS_PROXY':'http://proxy:7890'})
+            self.assertEqual(run.call_args_list[0].args[0][3],'HTTPS_PROXY=')
+            self.assertEqual(run.call_args_list[0].kwargs['env']['NO_PROXY'],'*')
+            self.assertEqual(run.call_args_list[1].args[0],command)
+            self.assertNotIn('insecure',repr(run.call_args_list).lower())
+
     def test_interrupted_jobs_are_released_and_partial_apply_triggers_rollback(self):
         module=self.worker_module()
         with tempfile.TemporaryDirectory() as folder,patch.dict(os.environ):

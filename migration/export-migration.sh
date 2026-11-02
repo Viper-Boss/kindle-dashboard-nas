@@ -41,6 +41,7 @@ fi
 tar \
   --exclude='./migration' \
   --exclude='./data/traffic.sqlite3*' \
+  --exclude='./data/auth.sqlite3*' \
   --exclude='./data/maintenance' \
   --exclude='./data/*-traffic-backup.sqlite3*' \
   --exclude='./security-staging' \

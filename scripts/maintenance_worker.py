@@ -132,6 +132,19 @@ class Worker:
         code=process.wait()
         if code:raise RuntimeError('命令失败（退出码 '+str(code)+'）：'+str(args[0]))
 
+    def run_network(self, args, env=None):
+        # Package registries may work directly even when the selected proxy
+        # node interrupts TLS. Retry through that proxy only if direct fails.
+        direct_env=dict(os.environ if env is None else env)
+        for key in ('HTTP_PROXY','HTTPS_PROXY','http_proxy','https_proxy','ALL_PROXY','all_proxy'):
+            direct_env[key]=''
+        direct_env['NO_PROXY']=direct_env['no_proxy']='*'
+        direct_args=[str(x).split('=',1)[0]+'=' if str(x).startswith(('HTTP_PROXY=','HTTPS_PROXY=','http_proxy=','https_proxy=')) else x for x in args]
+        try:self.run(direct_args,env=direct_env)
+        except RuntimeError:
+            self.log('直连构建或扫描失败，使用现有代理重试。\n')
+            self.run(args,env=env)
+
     def compose(self, *args, extra=None):
         command=['docker','compose','--project-directory',str(self.project),'-f',str(self.project/'docker-compose.yml')]
         if extra:command+=['-f',str(extra)]
@@ -194,11 +207,11 @@ class Worker:
                             text=text.replace(marker,'COPY --from=kindle_build_cache /go/pkg/mod /go/pkg/mod\nCOPY --from=kindle_build_cache /root/.cache/go-build /root/.cache/go-build\n'+marker,1)
                             (source/'mihomo/Dockerfile.cache').write_text(text)
                             command+=['-f',str(source/'mihomo/Dockerfile.cache')]
-            self.run(command+['-t',tag,str(source/context)],env=env)
+            self.run_network(command+['-t',tag,str(source/context)],env=env)
             images[service]=tag
             if service=='mihomo':
                 builder='kindle-upgrade-builder:'+release['commit'][:12]
-                self.run(command+['--target','build','-t',builder,str(source/context)],env=env)
+                self.run_network(command+['--target','build','-t',builder,str(source/context)],env=env)
                 self.save_private('build-cache.json',{'image':builder})
         return images
 
@@ -231,7 +244,7 @@ class Worker:
         scanner=self.scanner();env=dict(os.environ,HTTP_PROXY=self.proxy,HTTPS_PROXY=self.proxy,NO_PROXY='localhost,127.0.0.1',GOMEMLIMIT='700MiB')
         for service,image in images.items():
             report=workspace/(service+'-security.json')
-            self.run([str(scanner),'image','--scanners','vuln','--cache-dir',str(self.state/'trivy-cache'),'--timeout','20m','--format','json','--output',str(report),image],env=env)
+            self.run_network([str(scanner),'image','--scanners','vuln','--cache-dir',str(self.state/'trivy-cache'),'--timeout','20m','--format','json','--output',str(report),image],env=env)
             data=json.loads(report.read_text())
             fixable=[v for result in data.get('Results',[]) for v in result.get('Vulnerabilities',[]) if v.get('FixedVersion')]
             if fixable:raise RuntimeError(service+' 镜像仍有 '+str(len(fixable))+' 条可修补漏洞')
