@@ -47,6 +47,20 @@ class MaintenanceTests(unittest.TestCase):
         runs['workflow_runs'][0]['conclusion']='success'
         with patch.object(maintenance,'api',side_effect=[commit,runs]):self.assertTrue(maintenance.latest_release()['ready'])
 
+    def test_github_download_falls_back_on_transport_failure(self):
+        import urllib.error
+        with patch.object(maintenance.urllib.request,'build_opener') as opener,patch.object(maintenance.urllib.request,'urlopen',return_value='proxy-response') as proxy:
+            opener.return_value.open.side_effect=urllib.error.URLError('TLS EOF')
+            self.assertEqual(maintenance.open_url('https://api.github.com/anything'),'proxy-response')
+            proxy.assert_called_once()
+
+    def test_github_permission_and_rate_limit_failures_are_not_retried(self):
+        import urllib.error
+        with patch.object(maintenance.urllib.request,'build_opener') as opener,patch.object(maintenance.urllib.request,'urlopen') as proxy:
+            opener.return_value.open.side_effect=urllib.error.HTTPError('https://api.github.com',403,'rate limit',{},None)
+            with self.assertRaises(urllib.error.HTTPError):maintenance.open_url('https://api.github.com/anything')
+            proxy.assert_not_called()
+
     def test_auto_sync_switch_is_a_boolean(self):
         with patch.object(maintenance,'DATA_ROOT',self.root):
             with self.assertRaises(ValueError):maintenance.set_auto_sync('false')
@@ -88,6 +102,19 @@ class WorkerInputTests(unittest.TestCase):
                 result=worker.shared.read('a'*32+'.json',section='jobs')
                 self.assertEqual(result['state'],'failed')
             with self.assertRaises(ValueError):worker.process({'id':'b'*32,'kind':'upgrade','state':'queued','requestedAt':'now','command':'anything'})
+
+    def test_interrupted_jobs_are_released_and_partial_apply_triggers_rollback(self):
+        module=self.worker_module()
+        with tempfile.TemporaryDirectory() as folder,patch.dict(os.environ):
+            root=Path(folder);project=root/'project';project.mkdir();(project/'.env').write_text('ADMIN_PASSWORD=test-password\n')
+            worker=module.Worker(project,root/'private',maintenance)
+            worker.shared.write('a'*32+'.json',{'id':'a'*32,'state':'running'},'jobs')
+            worker.save_private('apply.json',{'pending':True})
+            def restore():worker.save_private('apply.json',{'pending':False})
+            with patch.object(worker,'rollback',side_effect=restore) as rollback:
+                worker.recover_interrupted();rollback.assert_called_once()
+            self.assertEqual(worker.shared.read('a'*32+'.json',section='jobs')['state'],'failed')
+            self.assertFalse(worker.private('apply.json')['pending'])
 
     def test_rollback_preserves_history_and_pauses_auto_sync(self):
         module=self.worker_module()

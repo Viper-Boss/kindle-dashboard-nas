@@ -11,6 +11,7 @@ import stat
 import threading
 import time
 import urllib.request
+import urllib.error
 
 REPOSITORY = 'Viper-Boss/kindle-dashboard-nas'
 DATA_ROOT = Path(os.getenv('KINDLE_DATA_ROOT', '/data'))
@@ -107,10 +108,24 @@ def utc_now():
     return datetime.now(timezone.utc).isoformat()
 
 
+def open_url(request, timeout=20):
+    # GitHub is often reachable directly while a healthy latency-test node may
+    # reject GitHub TLS. Both routes keep normal certificate verification.
+    direct=urllib.request.build_opener(urllib.request.ProxyHandler({}))
+    try:
+        return direct.open(request,timeout=timeout)
+    except urllib.error.HTTPError as error:
+        if error.code < 500:
+            raise
+    except (urllib.error.URLError,TimeoutError,OSError):
+        pass
+    return urllib.request.urlopen(request,timeout=timeout)
+
+
 def api(path):
     request=urllib.request.Request('https://api.github.com/repos/'+REPOSITORY+path,
                                   headers={'Accept':'application/vnd.github+json','User-Agent':'Kindle-NAS-Updater'})
-    with urllib.request.urlopen(request,timeout=20) as response:return json.load(response)
+    with open_url(request,timeout=20) as response:return json.load(response)
 
 
 def deployment():

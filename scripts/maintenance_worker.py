@@ -144,7 +144,7 @@ class Worker:
         if any(not allowed_source(n) or x['mode'] not in ('100644','100755') for n,x in manifest.items()):
             raise ValueError('仓库含受保护运行文件或不支持的链接')
         request=urllib.request.Request('https://codeload.github.com/'+self.m.REPOSITORY+'/tar.gz/'+release['commit'],headers={'User-Agent':'Kindle-NAS-Updater'})
-        with urllib.request.urlopen(request,timeout=90) as response:payload=response.read(32_000_001)
+        with self.m.open_url(request,timeout=90) as response:payload=response.read(32_000_001)
         if len(payload)>32_000_000:raise ValueError('源码归档过大')
         source=workspace/'source';source.mkdir(parents=True)
         found=set()
@@ -210,8 +210,8 @@ class Worker:
         if not arch:raise ValueError('此 NAS 架构暂不支持自动镜像扫描')
         version='0.76.1';name=f'trivy_{version}_Linux-{arch}.tar.gz'
         base='https://github.com/aquasecurity/trivy/releases/download/v'+version+'/'
-        with urllib.request.urlopen(base+name,timeout=180) as response:data=response.read(100_000_000)
-        with urllib.request.urlopen(base+f'trivy_{version}_checksums.txt',timeout=30) as response:checks=response.read().decode()
+        with self.m.open_url(base+name,timeout=180) as response:data=response.read(100_000_000)
+        with self.m.open_url(base+f'trivy_{version}_checksums.txt',timeout=30) as response:checks=response.read().decode()
         wanted=next((line.split()[0] for line in checks.splitlines() if line.split()[-1]==name),None)
         if hashlib.sha256(data).hexdigest()!=wanted:raise ValueError('安全扫描器校验失败')
         with tarfile.open(fileobj=io.BytesIO(data)) as archive:
@@ -315,6 +315,7 @@ class Worker:
         write_source(self.project,'data/deployment.json',json.dumps(current).encode(),0o600)
         # A manual rollback pauses auto sync so it cannot immediately undo that choice.
         self.shared.write('settings.json',{'autoSync':False})
+        self.save_private('apply.json',{'pending':False})
 
     def upgrade(self):
         self.stage('核对 GitHub 最新版本和安全检查')
@@ -328,6 +329,7 @@ class Worker:
         source,manifest=self.fetch_source(release,workspace)
         images=self.build(source,release);self.validate(source,images,workspace)
         selected=self.selectors();backup=self.backup(manifest)
+        self.save_private('apply.json',{'pending':True,'backup':str(backup)})
         try:
             self.stage('应用新版本，重建服务')
             self.install_source(source,manifest)
@@ -338,6 +340,7 @@ class Worker:
             record={'commit':release['commit'],'installedAt':self.m.utc_now(),'message':release['message'],'managedFiles':sorted(manifest)}
             self.save_private('current.json',record)
             write_source(self.project,'data/deployment.json',json.dumps(record,ensure_ascii=False,indent=2).encode(),0o600)
+            self.save_private('apply.json',{'pending':False})
         except Exception:
             self.log('应用新版本失败，执行自动回退。\n');self.rollback();raise
         with self.lock:self.info['rollbackAvailable']=True
@@ -364,7 +367,19 @@ class Worker:
             with self.lock:self.info.update(busy=False,stage='空闲',lastJob=job['id'],rollbackAvailable=bool(self.private('rollback.json')))
             self.job=None
 
+    def recover_interrupted(self):
+        for name in self.shared.names('jobs'):
+            job=self.shared.read(name,{},'jobs')
+            if isinstance(job,dict) and job.get('state')=='running':
+                job.update(state='failed',stage='上次维护进程已中断',finishedAt=self.m.utc_now())
+                self.shared.write(name,job,'jobs')
+        if self.private('apply.json',{}).get('pending'):
+            self.process({'id':secrets_token(),'kind':'rollback','state':'queued','requestedAt':self.m.utc_now()})
+            if self.private('apply.json',{}).get('pending'):
+                raise RuntimeError('中断后的自动回退未完成，请检查 NAS 维护日志')
+
     def loop(self, once=False):
+        self.recover_interrupted()
         threading.Thread(target=self.heartbeat,daemon=True).start()
         next_check=0
         while not self.stop.is_set():
