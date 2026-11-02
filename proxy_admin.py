@@ -41,11 +41,14 @@ def add_telegram_group(text):
         block = whatsapp.group(0).replace('WhatsApp代理', TELEGRAM_GROUP, 1)
         text = text[:whatsapp.end()] + block + text[whatsapp.end():]
     else:
-        block = '  - name: ' + TELEGRAM_GROUP + '\n    type: select\n    proxies:\n      - 数据屏代理\n      - DIRECT\n'
+        group_indent = re.match(r'([ \t]*)-', text[groups.end():])
+        pad = group_indent.group(1) if group_indent else '  '
+        block = (pad + '- name: ' + TELEGRAM_GROUP + '\n' + pad + '  type: select\n'
+                 + pad + '  proxies:\n' + pad + '    - 数据屏代理\n' + pad + '    - DIRECT\n')
         text = text[:groups.end()] + block + text[groups.end():]
     rules = re.search(r'^rules:[ \t]*\n', text, re.M)
     indent = re.match(r'([ \t]*)-', text[rules.end():])
-    pad = indent.group(1) if indent and indent.group(1) else '  '
+    pad = indent.group(1) if indent else '  '
     lines = ''.join(pad + '- ' + rule + '\n' for rule in telegram_rule_lines())
     return text[:rules.end()] + lines + text[rules.end():], True
 
@@ -53,7 +56,14 @@ def read_access():
     """各服务是否允许外网访问。没有文件=保持原行为（允许）；文件损坏=安全起见一律关闭。"""
     try:
         raw = json.loads((ROOT / 'access.json').read_text())
-        return {s: bool((raw.get(s) or {}).get('wan', True)) for s in SERVICES}
+        if not isinstance(raw, dict):
+            return {s: False for s in SERVICES}
+        values = {}
+        for service in SERVICES:
+            item = raw.get(service, {})
+            value = item.get('wan', True) if isinstance(item, dict) else None
+            values[service] = value if isinstance(value, bool) else False
+        return values
     except FileNotFoundError:
         return {s: True for s in SERVICES}
     except Exception:

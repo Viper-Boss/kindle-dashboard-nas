@@ -700,6 +700,8 @@ def find_font(size: int, bold: bool = False) -> ImageFont.FreeTypeFont | ImageFo
         candidates.extend(
             [
                 "/usr/share/fonts/opentype/noto/NotoSansCJK-Bold.ttc",
+                "/usr/share/fonts/noto-cjk/NotoSansCJK-Bold.ttc",
+                "/usr/share/fonts/noto/NotoSansCJK-Bold.ttc",
                 "/usr/share/fonts/opentype/noto/NotoSerifCJK-Bold.ttc",
                 "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
                 "/usr/share/fonts/dejavu/DejaVuSans-Bold.ttf",
@@ -712,6 +714,8 @@ def find_font(size: int, bold: bool = False) -> ImageFont.FreeTypeFont | ImageFo
     candidates.extend(
         [
             "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+            "/usr/share/fonts/noto-cjk/NotoSansCJK-Regular.ttc",
+            "/usr/share/fonts/noto/NotoSansCJK-Regular.ttc",
             "/usr/share/fonts/opentype/noto/NotoSerifCJK-Regular.ttc",
             "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
             "/usr/share/fonts/dejavu/DejaVuSans.ttf",

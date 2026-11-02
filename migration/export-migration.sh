@@ -2,7 +2,7 @@
 set -eu
 
 # Run this script from anywhere on the source OECT. It exports the project,
-# private runtime configuration, and both Docker images into one archive.
+# private runtime configuration, and all runtime Docker images into one archive.
 SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 PROJECT_DIR=$(CDPATH= cd -- "$SCRIPT_DIR/.." && pwd)
 STAMP=$(date '+%Y%m%d_%H%M%S')
@@ -36,6 +36,8 @@ fi
 echo "[2/4] 复制项目和私有配置……"
 tar \
   --exclude='./migration' \
+  --exclude='./security-staging' \
+  --exclude='./.git' \
   --exclude='./__pycache__' \
   --exclude='./*.zip' \
   --exclude='./*.tar.gz' \

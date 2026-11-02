@@ -1,7 +1,7 @@
 # 第三方实现
 
 - Telegram MTProto 实现：<https://github.com/alexbers/mtprotoproxy>，原项目 MIT 许可见 `mtproto/LICENSE`；本项目在主事件循环中增加 WhatsApp 转发服务。原版 pyaes 及其许可随源码保留。
-- Mihomo：<https://github.com/MetaCubeX/mihomo>，作为独立 Docker 镜像运行，未将其源代码复制到本仓库。
+- Mihomo：<https://github.com/MetaCubeX/mihomo>，GPL-3.0，作为独立进程运行。`mihomo/Dockerfile` 固定 v1.19.33 对应提交 `3f27ef39f8c96bbfbc8b0b9bb10f5c9ef60149d8` 和源码 SHA-256，`mihomo/patch-dependencies.sh` 记录依赖修补，保留上游 gVisor 功能。完整对应源码由公开上游提交和本仓库构建配方恢复；镜像内保留 `/LICENSE.mihomo`。
 - WhatsApp 端口与上游协议依据官方实现：<https://github.com/WhatsApp/proxy>。本项目使用 Python 实现固定目标的 TCP 转发，并按官方聊天后端添加 PROXY v1 头。
 - Python 依赖：Pillow、PySocks、PyCryptodome，分别遵循各自上游许可。
 

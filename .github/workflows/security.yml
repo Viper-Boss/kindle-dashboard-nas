@@ -1,0 +1,66 @@
+name: Security and regression checks
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+  schedule:
+    - cron: '17 3 * * 1'
+permissions:
+  contents: read
+jobs:
+  dependencies:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: '3.12'
+      - name: Install dependencies and test tools
+        run: python -m pip install -r requirements.txt -r mtproto/requirements.txt pip-audit==2.10.1 PyYAML==6.0.3
+      - name: Regression tests
+        run: python -m unittest discover -s tests -v
+      - name: Audit both runtime manifests
+        run: python -m pip_audit --strict --no-deps --disable-pip -r requirements.txt -r mtproto/requirements.txt
+  images:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Build fresh images
+        run: |
+          docker build --pull --no-cache -t kindle-dashboard:security .
+          docker build --pull --no-cache -t nas-mtproto:security mtproto
+          docker build --pull --no-cache -t nas-mihomo:security mihomo
+      - name: Check Go call paths and the healthcheck binary with the official vulnerability checker
+        run: |
+          docker build --target build -t mihomo-security-builder mihomo
+          docker run --rm mihomo-security-builder sh -ec '
+            go install golang.org/x/vuln/cmd/govulncheck@v1.9.0
+            /go/bin/govulncheck -tags with_gvisor .
+            /go/bin/govulncheck -mode=binary /out/healthcheck
+          '
+      - name: Install checksum-verified Trivy
+        env:
+          VERSION: '0.76.1'
+        run: |
+          curl --fail --location --retry 3 -O "https://github.com/aquasecurity/trivy/releases/download/v${VERSION}/trivy_${VERSION}_Linux-64bit.tar.gz"
+          curl --fail --location --retry 3 -O "https://github.com/aquasecurity/trivy/releases/download/v${VERSION}/trivy_${VERSION}_checksums.txt"
+          grep " trivy_${VERSION}_Linux-64bit.tar.gz$" "trivy_${VERSION}_checksums.txt" | sha256sum --check
+          tar -xzf "trivy_${VERSION}_Linux-64bit.tar.gz" trivy
+      - name: Scan runtime images and fail on vulnerabilities with available fixes
+        run: |
+          set -euo pipefail
+          mkdir -p security-reports
+          images=(kindle-dashboard:security nas-mtproto:security nas-mihomo:security)
+          result=0
+          for index in "${!images[@]}"; do
+            ./trivy image --scanners vuln --timeout 15m --format json --output "security-reports/image-${index}.json" "${images[$index]}"
+            ./trivy image --scanners vuln --timeout 15m --ignore-unfixed --exit-code 1 "${images[$index]}" || result=1
+          done
+          exit "$result"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: always()
+        with:
+          name: runtime-image-security-reports
+          path: security-reports/
+          if-no-files-found: ignore

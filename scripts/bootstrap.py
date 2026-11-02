@@ -37,6 +37,14 @@ def main():
     write_private(tg_path, (ROOT / 'mtproto/config.example.py').read_text(encoding='utf-8').replace('MTPROTO_SECRET', secrets.token_hex(16)))
     if hasattr(os, 'chown'):
         os.chown(tg_path, 0, 0)
+    # FnOS may create bind directories with mode 000 and grant access only
+    # through ACLs. The relay drops DAC override capabilities, so its root UID
+    # still needs ordinary traversal/read permissions for these mounts.
+    for directory in [ROOT / 'proxy', ROOT / 'mtproto',
+                      *(p for p in (ROOT / 'mtproto').rglob('*') if p.is_dir())]:
+        os.chmod(directory, 0o755)
+    for source in (ROOT / 'mtproto').rglob('*.py'):
+        os.chmod(source, 0o600 if source == tg_path else 0o644)
     # Read the existing secret so rerunning this script keeps the client link valid.
     import runpy
     tg_secret = runpy.run_path(str(tg_path))['USERS']['lan']

@@ -59,3 +59,14 @@ python3 -m unittest discover -s tests -v
 后台保存代理配置会生成 `proxy/backups/` 备份，并调用内核校验重载；失败会恢复旧配置。节点选择通过 Mihomo `profile.store-selected` 保存。
 
 原有包含私密数据的迁移功能保留在 `migration/`，使用前阅读其说明。仓库不包含个人数据屏状态、账户 Key、代理订阅、生成的 MTProto 密钥或历史私密压缩包。
+## 安全构建与更新
+
+Python 运行时使用固定摘要的 Python 3.12 / Alpine 基础镜像，安装修补后的系统库和中文字体；依赖来自根目录及 `mtproto/requirements.txt`。镜像安装完成后删除 pip 和 ensurepip，运行中的服务不需要安装软件。依赖变更请修改清单并重新构建镜像。
+
+Mihomo 由 `mihomo/` 中的配方从固定上游源码构建，应用 Go 依赖修补并保留 gVisor。最终镜像只有静态程序、证书、时区和许可。
+
+升级时保留 `.env`、`data/`、`proxy/` 和 `mtproto/config.py`。先运行 `docker compose build --pull`，再执行 `docker compose up -d` 来应用新镜像和挂载；单独 restart 不会生效。旧配置首次升级后，在“连接服务”的 Telegram 卡片点击“单独设置出口”，为现有配置添加 Telegram 策略组。
+
+8787 默认只绑定 `NAS_BIND_IP` 的局域网 IPv4。Telegram/WhatsApp 外网开关按源地址判断；Docker 桥接网关转发后无法证明来自局域网的连接按外网处理，关闭开关时拒绝此类连接。路由器若主动对外网连接做源地址伪装，仍须由路由器/防火墙限制访问。
+
+GitHub 的 Security and regression checks 工作流每周及提交时执行测试、Python 依赖审计和三个最终镜像扫描，并保存完整扫描 JSON。发现有可用补丁的漏洞会使检查失败。历史 Dependabot 告警以 GitHub 实际清单为准；在 NAS 重新构建镜像并不会直接关闭 Python 清单告警。此次核查范围和结果见 [安全修复记录](SECURITY-2026-11-02.md)。

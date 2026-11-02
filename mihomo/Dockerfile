@@ -1,0 +1,29 @@
+FROM golang:1.27-alpine@sha256:d200d2dd76b03a99b52651fd1325aff7dcd35422c35c01bac56571b0507f3deb AS build
+ARG MIHOMO_COMMIT=3f27ef39f8c96bbfbc8b0b9bb10f5c9ef60149d8
+ARG MIHOMO_SOURCE_SHA256=ecda5f8c8a8a1d60bc088c2640c85d92c8f002c0686234a26bdf671735afe216
+ENV CGO_ENABLED=0 GOTOOLCHAIN=local GOMAXPROCS=2 GOMEMLIMIT=1400MiB
+RUN apk add --no-cache git ca-certificates tzdata
+WORKDIR /src
+RUN (wget -q -O /tmp/source.tar.gz "https://codeload.github.com/MetaCubeX/mihomo/tar.gz/${MIHOMO_COMMIT}" \
+      || HTTPS_PROXY= HTTP_PROXY= https_proxy= http_proxy= wget -q -O /tmp/source.tar.gz "https://codeload.github.com/MetaCubeX/mihomo/tar.gz/${MIHOMO_COMMIT}") \
+    && echo "${MIHOMO_SOURCE_SHA256}  /tmp/source.tar.gz" | sha256sum -c - \
+    && tar -xzf /tmp/source.tar.gz --strip-components=1
+COPY patch-dependencies.sh /tmp/patch-dependencies.sh
+RUN sh /tmp/patch-dependencies.sh
+RUN go build -tags with_gvisor -trimpath -buildvcs=false \
+       -ldflags '-s -w -X github.com/metacubex/mihomo/constant.Version=v1.19.33-security.1' -o /out/mihomo .
+COPY healthcheck.go /tmp/healthcheck.go
+RUN go build -trimpath -o /out/healthcheck /tmp/healthcheck.go
+
+FROM scratch
+ENV HOME=/root TZ=Asia/Shanghai
+LABEL org.opencontainers.image.source="https://github.com/Viper-Boss/kindle-dashboard-nas" \
+      org.opencontainers.image.upstream="https://github.com/MetaCubeX/mihomo" \
+      org.opencontainers.image.licenses="GPL-3.0"
+COPY --from=build /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
+COPY --from=build /usr/share/zoneinfo /usr/share/zoneinfo
+COPY --from=build /out/mihomo /mihomo
+COPY --from=build /out/healthcheck /healthcheck
+COPY --from=build /src/LICENSE /LICENSE.mihomo
+WORKDIR /root/.config/mihomo
+ENTRYPOINT ["/mihomo"]

@@ -11,6 +11,8 @@ import ipaddress
 import json
 import os
 import time
+import socket
+import struct
 
 ACCESS_FILE = os.environ.get('ACCESS_FILE', '/proxy/access.json')
 SERVICES = ('telegram', 'whatsapp')
@@ -24,6 +26,32 @@ STATS = {name: {'lan': 0, 'wan': 0, 'blocked': 0} for name in SERVICES}
 _cache = {'at': 0.0, 'data': None}
 
 
+def bridge_gateways():
+    """Docker's userland proxy can replace a public IPv6 peer with this address.
+
+    A gateway peer cannot prove LAN origin, so treat it as WAN. Ordinary LAN
+    peers keep their source address and are unaffected.
+    """
+    try:
+        with open('/proc/net/route', encoding='ascii') as routes:
+            return {socket.inet_ntoa(struct.pack('<I', int(row[2], 16)))
+                    for line in routes for row in [line.split()]
+                    if len(row) >= 4 and row[1] == '00000000' and row[2] != '00000000'}
+    except (OSError, ValueError):
+        return set()
+
+
+def parse_access(raw):
+    if not isinstance(raw, dict):
+        return {name: False for name in SERVICES}
+    data = {}
+    for name in SERVICES:
+        item = raw.get(name, {})
+        value = item.get('wan', True) if isinstance(item, dict) else None
+        data[name] = value if isinstance(value, bool) else False
+    return data
+
+
 def is_lan(host):
     try:
         ip = ipaddress.ip_address(str(host).split('%')[0])
@@ -31,6 +59,8 @@ def is_lan(host):
         return False
     if ip.version == 6 and ip.ipv4_mapped:
         ip = ip.ipv4_mapped
+    if str(ip) in bridge_gateways():
+        return False
     return any(ip in network for network in LAN_NETWORKS)
 
 
@@ -42,10 +72,10 @@ def _load():
     try:
         with open(ACCESS_FILE, encoding='utf-8') as handle:
             raw = json.load(handle)
-        data = {name: bool((raw.get(name) or {}).get('wan', True)) for name in SERVICES}
+        data = parse_access(raw)
     except FileNotFoundError:
         data = {name: True for name in SERVICES}
-    except (OSError, ValueError, AttributeError):
+    except (OSError, ValueError, AttributeError, TypeError):
         data = {name: False for name in SERVICES}
     _cache.update(at=now, data=data)
     return data

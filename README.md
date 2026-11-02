@@ -39,6 +39,10 @@ docker compose up -d --build
 
 仓库只保存实现和安全模板；实际 `.env`、订阅、密钥、数据、日志和私密备份不上传。首次启动脚本会在本地生成独立密钥，重复运行保留已有凭据。
 
+## 安全维护
+
+依赖审计、三个最终镜像的漏洞扫描与回归测试由 GitHub Actions 定期执行。安全构建方式见 [部署与维护](docs/DEPLOYMENT.md)，本次修复结果见 [安全修复记录](docs/SECURITY-2026-11-02.md)。
+
 ## 许可
 
 本项目采用 [GNU AGPL-3.0](LICENSE)（SPDX: AGPL-3.0-only）。第三方实现保留各自原有许可，详见 THIRD_PARTY.md。

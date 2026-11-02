@@ -61,6 +61,23 @@ class AccessControlTests(unittest.TestCase):
         self.assertFalse(ac.check('telegram', '8.8.8.8'))
         self.assertTrue(ac.check('telegram', '192.168.1.2'))
 
+    def test_invalid_switch_types_fail_closed(self):
+        for raw in ([], None, {'telegram': {'wan': 'false'}},
+                    {'telegram': {'wan': 1}}, {'telegram': True}):
+            self.file.write_text(json.dumps(raw))
+            self.assertFalse(ac.check('telegram', '8.8.8.8'), raw)
+
+    def test_bridge_proxy_cannot_bypass_wan_switch(self):
+        self.write(False, False)
+        with patch.object(ac, 'bridge_gateways', return_value={'172.18.0.1'}):
+            for host in ('172.18.0.1', '::ffff:172.18.0.1'):
+                self.assertFalse(ac.check('telegram', host))
+                self.assertFalse(ac.check('whatsapp', host))
+            self.assertTrue(ac.check('telegram', '192.168.120.111'))
+            self.write(True, False)
+            self.assertTrue(ac.check('telegram', '172.18.0.1'))
+            self.assertFalse(ac.check('whatsapp', '172.18.0.1'))
+
 
 class ProxyAdminTests(unittest.TestCase):
     def setUp(self):
@@ -109,6 +126,21 @@ class ProxyAdminTests(unittest.TestCase):
         self.assertEqual(data['rules'][-1], 'MATCH,数据屏代理')           # 兜底规则仍在最后
         self.assertIn('IP-CIDR,149.154.160.0/20,Telegram代理,no-resolve', data['rules'])
         self.assertFalse(pa.add_telegram_group(new)[1])                    # 重复添加不会再改
+
+    @unittest.skipIf(yaml is None, 'PyYAML not installed')
+    def test_add_telegram_group_preserves_unindented_yaml_lists(self):
+        for whatsapp in (True, False):
+            groups = [{'name': '数据屏代理', 'type': 'select', 'proxies': ['DIRECT']}]
+            if whatsapp:
+                groups.append({'name': 'WhatsApp代理', 'type': 'select', 'proxies': ['DIRECT']})
+            original = {'proxy-groups': groups, 'rules': ['MATCH,数据屏代理']}
+            text = yaml.safe_dump(original, allow_unicode=True, sort_keys=False)
+            result, changed = pa.add_telegram_group(text)
+            self.assertTrue(changed)
+            parsed = yaml.safe_load(result)
+            self.assertIn('Telegram代理', [g['name'] for g in parsed['proxy-groups']])
+            self.assertEqual(parsed['rules'][-1], 'MATCH,数据屏代理')
+            self.assertFalse(pa.add_telegram_group(result)[1])
 
     @unittest.skipIf(yaml is None, 'PyYAML not installed')
     def test_templates_define_the_group_and_rules(self):

@@ -35,7 +35,7 @@ fi
 echo "[4/4] 等待健康检查……"
 i=0
 while [ "$i" -lt 36 ]; do
-  if wget -q -T 3 -O /dev/null http://127.0.0.1:8787/dashboard.png 2>/dev/null; then
+  if docker compose exec -T kindle-dashboard python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8787/healthz', timeout=3).read()" >/dev/null 2>&1; then
     echo
     echo "迁移成功。后台：http://本机IP:8787/admin"
     echo "数据屏：http://本机IP:8787/dashboard.png"
