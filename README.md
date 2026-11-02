@@ -13,7 +13,7 @@ Kindle 数据屏、局域网代理、Telegram MTProto 和 WhatsApp 代理的一�
 
 ```bash
 cp .env.example .env
-python3 scripts/bootstrap.py
+sudo python3 scripts/bootstrap.py
 # 编辑 .env 中的 NAS 地址等配置；管理员密码会自动生成
 # 首次部署默认 DIRECT，可在后台配置自己的订阅
 

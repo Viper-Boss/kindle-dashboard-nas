@@ -6,7 +6,7 @@
 
 ```bash
 cp .env.example .env
-python3 scripts/bootstrap.py
+sudo python3 scripts/bootstrap.py
 # 编辑 .env，确认 NAS_BIND_IP、NAS_LAN_HOST 和管理员密码
 docker compose up -d --build
 ```

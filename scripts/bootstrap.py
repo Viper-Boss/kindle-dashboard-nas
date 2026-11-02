@@ -17,6 +17,8 @@ def write_private(path, text):
 
 
 def main():
+    if hasattr(os, 'geteuid') and os.geteuid() != 0:
+        raise SystemExit('Run with sudo: runtime secrets must be owned by the root UID used by the read-only proxy container.')
     env = ROOT / '.env'
     if not env.exists():
         shutil.copy2(ROOT / '.env.example', env)
@@ -33,6 +35,8 @@ def main():
     write_private(ROOT / 'proxy/config.yaml', template.replace('CONTROLLER_SECRET', secret_path.read_text().strip()))
     tg_path = ROOT / 'mtproto/config.py'
     write_private(tg_path, (ROOT / 'mtproto/config.example.py').read_text(encoding='utf-8').replace('MTPROTO_SECRET', secrets.token_hex(16)))
+    if hasattr(os, 'chown'):
+        os.chown(tg_path, 0, 0)
     # Read the existing secret so rerunning this script keeps the client link valid.
     import runpy
     tg_secret = runpy.run_path(str(tg_path))['USERS']['lan']
