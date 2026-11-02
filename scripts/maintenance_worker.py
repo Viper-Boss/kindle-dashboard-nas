@@ -85,7 +85,7 @@ class Worker:
         self.project,self.state,self.m=Path(project).resolve(),Path(state).resolve(),maintenance
         self.state.mkdir(parents=True,exist_ok=True);self.state.chmod(0o700)
         self.shared=maintenance.SharedStore(self.project/'data')
-        self.info={'busy':False,'stage':'空闲','heartbeat':time.time()}
+        self.info={'busy':False,'stage':'空闲','heartbeat':time.time(),'rollbackAvailable':bool(self.private('rollback.json'))}
         self.lock=threading.Lock();self.job=None
         self.proxy='http://'+self.env_settings().get('NAS_BIND_IP','192.168.120.200')+':7890'
         os.environ.update(HTTP_PROXY=self.proxy,HTTPS_PROXY=self.proxy,NO_PROXY='localhost,127.0.0.1')

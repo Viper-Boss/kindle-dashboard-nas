@@ -103,6 +103,16 @@ class WorkerInputTests(unittest.TestCase):
                 self.assertEqual(result['state'],'failed')
             with self.assertRaises(ValueError):worker.process({'id':'b'*32,'kind':'upgrade','state':'queued','requestedAt':'now','command':'anything'})
 
+    def test_worker_restart_keeps_rollback_button_available(self):
+        module=self.worker_module()
+        with tempfile.TemporaryDirectory() as folder,patch.dict(os.environ):
+            root=Path(folder);project=root/'project';project.mkdir();(project/'.env').write_text('ADMIN_PASSWORD=test-password\n')
+            worker=module.Worker(project,root/'private',maintenance)
+            self.assertFalse(worker.info['rollbackAvailable'])
+            worker.save_private('rollback.json',{'directory':str(root/'private/backups/previous')})
+            restarted=module.Worker(project,root/'private',maintenance)
+            self.assertTrue(restarted.info['rollbackAvailable'])
+
     def test_build_tries_direct_then_existing_proxy_without_disabling_tls(self):
         module=self.worker_module()
         with tempfile.TemporaryDirectory() as folder,patch.dict(os.environ):
