@@ -4,6 +4,7 @@ Matches WhatsApp/proxy's chat and media backends. Only WhatsApp destinations
 are reachable; this is not an open HTTP/SOCKS proxy. No extra dependencies.
 """
 import asyncio
+import errno
 import ipaddress
 import json
 import socket
@@ -72,8 +73,12 @@ async def pump(reader, writer, direction):
         data = await asyncio.wait_for(reader.read(65536), IDLE_TIMEOUT)
         if not data:
             if writer.can_write_eof():
-                writer.write_eof()
-                await writer.drain()
+                try:
+                    writer.write_eof()
+                    await writer.drain()
+                except OSError as error:
+                    if error.errno not in (errno.ENOTCONN, errno.EPIPE, errno.ECONNRESET):
+                        raise
             return
         writer.write(data)
         await writer.drain()

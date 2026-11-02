@@ -1245,7 +1245,7 @@ class Handler(BaseHTTPRequestHandler):
         if path in ("/", "/index.html"):
             body = ('<!doctype html><html lang="zh-CN"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">'
                 '<title>NAS 数据屏与代理</title><style>body{font-family:system-ui,Microsoft YaHei;margin:0;background:#f4f1e8;color:#24231f}.wrap{max-width:950px;margin:40px auto;padding:20px}.card{padding:24px;background:#fffdf8;border:1px solid #d7d1c3;border-radius:16px;margin:18px 0}a{color:#237847}img{max-width:100%;max-height:600px;border-radius:12px}code{overflow-wrap:anywhere}.button{display:inline-block;background:#24231f;color:white;padding:14px 22px;border-radius:10px;text-decoration:none}</style>'
-                '<div class="wrap"><h1>NAS 数据屏与局域网代理</h1><p>行情数据屏 · 节点管理 · Telegram MTProto</p>'
+                '<div class="wrap"><h1>NAS 数据屏与局域网代理</h1><p>行情数据屏 · 节点管理 · Telegram MTProto · WhatsApp</p><p><a href="https://github.com/Viper-Boss/kindle-dashboard-nas">项目源码（AGPL-3.0）</a></p>'
                 '<div class="card"><h2>代理管理</h2><p>查看节点、切换线路、测试延迟、更新订阅和管理活动连接。</p><a class="button" href="/admin">打开管理后台</a>'
                 '<p>混合代理 <code>192.168.120.200:7890</code> · SOCKS5 <code>192.168.120.200:7891</code> · HTTP <code>192.168.120.200:7892</code></p></div>'
                 '<div class="card"><h2>数据屏预览</h2><p><a href="/dashboard.png">查看原图</a> · <a href="/data.json">原始数据</a></p><img src="/dashboard.png" alt="Kindle 数据屏"></div></div></html>').encode('utf-8')
