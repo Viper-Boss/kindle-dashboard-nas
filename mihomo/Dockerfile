@@ -10,8 +10,13 @@ RUN (wget -q -O /tmp/source.tar.gz "https://codeload.github.com/MetaCubeX/mihomo
     && tar -xzf /tmp/source.tar.gz --strip-components=1
 COPY patch-dependencies.sh /tmp/patch-dependencies.sh
 RUN sh /tmp/patch-dependencies.sh
+COPY tools/patch-traffic/main.go /tmp/patch-traffic.go
+COPY traffic/client_traffic.go tunnel/statistic/client_traffic_kindle.go
+COPY traffic/client_traffic_test.go tunnel/statistic/client_traffic_kindle_test.go
+RUN go run /tmp/patch-traffic.go \
+    && go test ./tunnel/statistic -run '^Test(ShortConnectionsAndMidnight|ConcurrentByteAccounting)$'
 RUN go build -tags with_gvisor -trimpath -buildvcs=false \
-       -ldflags '-s -w -X github.com/metacubex/mihomo/constant.Version=v1.19.33-security.1' -o /out/mihomo .
+       -ldflags '-s -w -X github.com/metacubex/mihomo/constant.Version=v1.19.33-security.2' -o /out/mihomo .
 COPY healthcheck.go /tmp/healthcheck.go
 RUN go build -trimpath -o /out/healthcheck /tmp/healthcheck.go
 
@@ -19,11 +24,12 @@ FROM scratch
 ENV HOME=/root TZ=Asia/Shanghai
 LABEL org.opencontainers.image.source="https://github.com/Viper-Boss/kindle-dashboard-nas" \
       org.opencontainers.image.upstream="https://github.com/MetaCubeX/mihomo" \
-      org.opencontainers.image.licenses="GPL-3.0"
+      org.opencontainers.image.licenses="AGPL-3.0-only AND GPL-3.0-only"
 COPY --from=build /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
 COPY --from=build /usr/share/zoneinfo /usr/share/zoneinfo
 COPY --from=build /out/mihomo /mihomo
 COPY --from=build /out/healthcheck /healthcheck
 COPY --from=build /src/LICENSE /LICENSE.mihomo
+COPY LICENSE.kindle /LICENSE.kindle
 WORKDIR /root/.config/mihomo
 ENTRYPOINT ["/mihomo"]

@@ -21,6 +21,8 @@ from typing import Any
 
 from PIL import Image, ImageDraw, ImageFont
 from admin_ui import enhance_admin_page
+from management import handle as management_handle
+import traffic_stats
 from proxy_admin import section as proxy_admin_section, handle as proxy_handle, save_and_reload, telegram_rule_lines
 
 
@@ -1122,7 +1124,10 @@ proxy-providers:
     health-check:
       enable: true
       url: https://www.gstatic.com/generate_204
-      interval: 600
+      interval: 3600
+      lazy: false
+      timeout: 5000
+      expected-status: 204
     header:
       User-Agent:
         - ClashMetaForAndroid/2.0
@@ -1137,7 +1142,11 @@ proxy-groups:
   - name: 自动选择
     type: url-test
     url: https://www.gstatic.com/generate_204
-    interval: 300
+    interval: 3600
+    lazy: false
+    timeout: 5000
+    expected-status: 204
+    tolerance: 0
     use:
       - airport
     exclude-filter: "一元机场|请立即|剩余流量|套餐到期"
@@ -1267,6 +1276,8 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_GET(self) -> None:
         global LAST_IMAGE
+        if management_handle(self, admin_authorized):
+            return
         if proxy_handle(self, admin_authorized):
             return
         parsed = urllib.parse.urlparse(self.path)
@@ -1360,6 +1371,8 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:
         global LAST_IMAGE, LAST_RENDER_TS
+        if management_handle(self, admin_authorized):
+            return
         if proxy_handle(self, admin_authorized):
             return
         parsed = urllib.parse.urlparse(self.path)
@@ -1439,9 +1452,18 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def main() -> None:
+    import signal
+    traffic_stats.start()
     server = ThreadingHTTPServer(("0.0.0.0", PORT), Handler)
+    def shutdown(*_):
+        threading.Thread(target=server.shutdown, daemon=True).start()
+    signal.signal(signal.SIGTERM, shutdown)
     print(f"Kindle dashboard server listening on 0.0.0.0:{PORT}", flush=True)
-    server.serve_forever()
+    try:
+        server.serve_forever()
+    finally:
+        traffic_stats.stop()
+        server.server_close()
 
 
 if __name__ == "__main__":

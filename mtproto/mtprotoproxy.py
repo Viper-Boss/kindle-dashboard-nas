@@ -1723,6 +1723,8 @@ async def handle_client_wrapper(reader, writer):
     if not access_control.check("telegram", peer[0] if peer else ""):
         writer.transport.abort()
         return
+    import traffic_accounting
+    reader, writer = traffic_accounting.wrap('telegram', peer, reader, writer)
     try:
         await handle_client(reader, writer)
     except (asyncio.IncompleteReadError, asyncio.CancelledError):

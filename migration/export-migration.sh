@@ -18,6 +18,7 @@ trap cleanup EXIT INT TERM
 command -v docker >/dev/null 2>&1 || { echo "错误：未找到 docker"; exit 1; }
 docker compose version >/dev/null 2>&1 || { echo "错误：未找到 docker compose"; exit 1; }
 
+umask 077
 mkdir -p "$BUNDLE_DIR/project"
 
 echo "[1/4] 检查并启动服务……"
@@ -34,8 +35,14 @@ if [ -n "$MTPROTO_IMAGE" ]; then
 fi
 
 echo "[2/4] 复制项目和私有配置……"
+if [ -f "$PROJECT_DIR/data/traffic.sqlite3" ]; then
+  docker exec kindle-dashboard python -c 'import traffic_stats; traffic_stats.collect_once(); traffic_stats.TrafficStore().backup("/data/migration-traffic-backup.sqlite3")'
+fi
 tar \
   --exclude='./migration' \
+  --exclude='./data/traffic.sqlite3*' \
+  --exclude='./data/maintenance' \
+  --exclude='./data/*-traffic-backup.sqlite3*' \
   --exclude='./security-staging' \
   --exclude='./.git' \
   --exclude='./__pycache__' \
@@ -44,6 +51,11 @@ tar \
   --exclude='./app_backup_*' \
   --exclude='./docker-compose_backup_*' \
   -C "$PROJECT_DIR" -cf - . | tar -C "$BUNDLE_DIR/project" -xf -
+
+if [ -f "$PROJECT_DIR/data/migration-traffic-backup.sqlite3" ]; then
+  cp "$PROJECT_DIR/data/migration-traffic-backup.sqlite3" "$BUNDLE_DIR/project/data/traffic.sqlite3"
+  rm -f "$PROJECT_DIR/data/migration-traffic-backup.sqlite3"
+fi
 
 echo "[3/4] 导出 Docker 镜像（可能需要几分钟）……"
 # shellcheck disable=SC2086  # IMAGES 需要按空格拆分

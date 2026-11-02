@@ -11,15 +11,26 @@ import os
 import socket
 import sys
 import time
+import platform
+import importlib.metadata
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import access_control  # noqa: E402
+import traffic_accounting  # noqa: E402
 
 STATE = {'enabled': True, 'startedAt': None, 'active': 0, 'accepted': 0,
          'upstreamConnected': 0, 'failed': 0, 'uploadBytes': 0,
          'downloadBytes': 0, 'lastError': '', 'lastConnectedAt': None}
 MAX_CONNECTIONS = 256
 IDLE_TIMEOUT = 300
+
+
+def component_versions():
+    values={'转发 Python':platform.python_version()}
+    for label,package in [('PyCryptodome','pycryptodome'),('PySocks','PySocks')]:
+        try:values[label]=importlib.metadata.version(package)
+        except importlib.metadata.PackageNotFoundError:values[label]=None
+    return values
 
 
 async def connect_socks(host, port, proxy_host='mihomo', proxy_port=7891):
@@ -98,6 +109,7 @@ async def relay(reader, writer, role):
     if STATE['active'] >= MAX_CONNECTIONS:
         writer.close()
         return
+    reader, writer = traffic_accounting.wrap('whatsapp', peer, reader, writer)
     STATE['active'] += 1
     STATE['accepted'] += 1
     upstream = None
@@ -153,7 +165,9 @@ async def health(reader, writer):
         if path != b'/status':
             writer.write(b'HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n')
         else:
-            payload = json.dumps(dict(STATE, access=access_control.snapshot())).encode()
+            payload = json.dumps(dict(STATE, access=access_control.snapshot(),
+                                      clientTraffic=traffic_accounting.snapshot(),
+                                      componentVersions=component_versions())).encode()
             writer.write(('HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: %d\r\nConnection: close\r\n\r\n' % len(payload)).encode() + payload)
         await writer.drain()
     except Exception:

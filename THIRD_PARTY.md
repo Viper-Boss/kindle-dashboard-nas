@@ -8,3 +8,5 @@
 本项目新编写的实现采用 GNU Affero General Public License v3.0（AGPL-3.0-only），见根目录 LICENSE。原有第三方 MIT 文件保留其上游许可和版权声明。
 
 - 后台内嵌字体 IBM Plex Sans（Fontsource 提供 WOFF2）：SIL Open Font License，原文见 docs/IBM-Plex-LICENSE.txt。
+
+- Mihomo 流量钩子与统计接口位于 mihomo/traffic 和 mihomo/tools/patch-traffic，采用 AGPL-3.0-only；结合后的内核遵循 AGPLv3，原 GPLv3 许可保留。镜像包含 /LICENSE.mihomo 和 /LICENSE.kindle，通过固定上游源码与本仓库补丁可重建对应版本。

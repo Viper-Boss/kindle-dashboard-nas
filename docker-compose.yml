@@ -1,5 +1,6 @@
 services:
   kindle-dashboard:
+    stop_grace_period: 30s
     image: nas-kindle-dashboard-security:local
     build: .
     container_name: kindle-dashboard
@@ -23,6 +24,10 @@ services:
     - ./app.py:/app/app.py:ro
     - ./proxy_admin.py:/app/proxy_admin.py:ro
     - ./admin_ui.py:/app/admin_ui.py:ro
+    - ./admin_extensions.py:/app/admin_extensions.py:ro
+    - ./management.py:/app/management.py:ro
+    - ./maintenance.py:/app/maintenance.py:ro
+    - ./traffic_stats.py:/app/traffic_stats.py:ro
   mihomo:
     image: nas-mihomo-security:local
     build: ./mihomo

@@ -231,12 +231,12 @@ def action(data):
             provider = next((name for name,p in api('/providers/proxies').get('providers',{}).items() if any(n['name']==node for n in p.get('proxies',[]))),None)
             if provider is None: raise ValueError('节点不存在')
             path = '/providers/proxies/' + quoted(provider) + '/' + quoted(node) + '/healthcheck'
-        return api(path + '?' + urllib.parse.urlencode({'timeout':5000,'url':'https://www.gstatic.com/generate_204'}), timeout=7)
+        return api(path + '?' + urllib.parse.urlencode({'timeout':5000,'url':'https://www.gstatic.com/generate_204','expected':'204'}), timeout=7)
     elif kind == 'test-all':
         obj = api('/proxies/' + quoted(data.get('group','')))
         names = obj.get('all',[])
         if not names: raise ValueError('策略组为空')
-        results=api('/group/'+quoted(data.get('group',''))+'/delay?timeout=5000&url=https%3A%2F%2Fwww.gstatic.com%2Fgenerate_204',timeout=20)
+        results=api('/group/'+quoted(data.get('group',''))+'/delay?timeout=5000&expected=204&url=https%3A%2F%2Fwww.gstatic.com%2Fgenerate_204',timeout=20)
         return {'tested':len(names),'available':sum(v>0 for v in results.values())}
     elif kind == 'mode':
         mode = data.get('mode')

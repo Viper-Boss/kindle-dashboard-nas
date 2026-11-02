@@ -17,7 +17,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 RUN python -m pip uninstall -y pip \
     && rm -rf /usr/local/lib/python3.12/ensurepip
 
-COPY app.py proxy_admin.py admin_ui.py ./
+COPY app.py proxy_admin.py admin_ui.py admin_extensions.py management.py maintenance.py traffic_stats.py ./
 
 EXPOSE 8787
 CMD ["python", "app.py"]
