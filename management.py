@@ -14,7 +14,6 @@ def handle(handler, authorized):
         raw=data if isinstance(data,bytes) else json.dumps(data,ensure_ascii=False).encode()
         handler.send_response(code);handler.send_header('Content-Type',content_type)
         handler.send_header('Cache-Control','no-store');handler.send_header('Content-Length',str(len(raw)))
-        if code==401:handler.send_header('WWW-Authenticate','Basic realm="Kindle Dashboard Admin", charset="UTF-8"')
         if filename:handler.send_header('Content-Disposition','attachment; filename="'+filename+'"')
         handler.end_headers();handler.wfile.write(raw)
     if not authorized(handler.headers):respond(401,{'error':'请先登录后台'});return True

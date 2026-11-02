@@ -22,6 +22,7 @@ from typing import Any
 from PIL import Image, ImageDraw, ImageFont
 from admin_ui import enhance_admin_page
 from management import handle as management_handle
+import web_auth
 import traffic_stats
 from proxy_admin import section as proxy_admin_section, handle as proxy_handle, save_and_reload, telegram_rule_lines
 
@@ -1177,6 +1178,8 @@ def admin_password_configured() -> bool:
 
 
 def admin_authorized(headers: Any) -> bool:
+    if web_auth.session_user(headers):
+        return True
     expected_user = os.getenv("ADMIN_USERNAME", "admin")
     expected_password = os.getenv("ADMIN_PASSWORD", "")
     if not admin_password_configured():
@@ -1276,6 +1279,8 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_GET(self) -> None:
         global LAST_IMAGE
+        if web_auth.handle(self):
+            return
         if management_handle(self, admin_authorized):
             return
         if proxy_handle(self, admin_authorized):
@@ -1292,10 +1297,8 @@ class Handler(BaseHTTPRequestHandler):
                 self.end_headers()
                 self.wfile.write(body)
                 return
-            if not admin_authorized(self.headers):
-                self.send_response(401)
-                self.send_header("WWW-Authenticate", 'Basic realm="Kindle Dashboard Admin", charset="UTF-8"')
-                self.end_headers()
+            if not web_auth.session_user(self.headers):
+                web_auth.redirect(self, "/login?next=%2Fadmin")
                 return
             body = admin_page(saved=urllib.parse.parse_qs(parsed.query).get("saved") == ["1"])
             self.send_response(200)
@@ -1371,6 +1374,8 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:
         global LAST_IMAGE, LAST_RENDER_TS
+        if web_auth.handle(self):
+            return
         if management_handle(self, admin_authorized):
             return
         if proxy_handle(self, admin_authorized):
@@ -1382,7 +1387,6 @@ class Handler(BaseHTTPRequestHandler):
             return
         if not admin_authorized(self.headers):
             self.send_response(401)
-            self.send_header("WWW-Authenticate", 'Basic realm="Kindle Dashboard Admin", charset="UTF-8"')
             self.end_headers()
             return
         origin = self.headers.get("Origin", "")

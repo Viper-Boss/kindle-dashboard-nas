@@ -28,6 +28,7 @@ services:
     - ./management.py:/app/management.py:ro
     - ./maintenance.py:/app/maintenance.py:ro
     - ./traffic_stats.py:/app/traffic_stats.py:ro
+    - ./web_auth.py:/app/web_auth.py:ro
   mihomo:
     image: nas-mihomo-security:local
     build: ./mihomo

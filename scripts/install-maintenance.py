@@ -13,6 +13,7 @@ def main():
     parser=argparse.ArgumentParser()
     parser.add_argument('--project',default=str(Path(__file__).resolve().parents[1]))
     parser.add_argument('--current-commit')
+    parser.add_argument('--state', help='私有状态目录，默认位于项目数据盘 security-staging/maintenance-private')
     parser.add_argument('--seed-builder')
     parser.add_argument('--seed-trivy')
     parser.add_argument('--seed-cache')
@@ -21,7 +22,10 @@ def main():
     project=Path(args.project).resolve()
     if not (project/'.env').is_file() or not (project/'scripts/maintenance_worker.py').is_file():
         raise SystemExit('项目目录缺少运行配置或维护程序')
-    state=Path('/var/lib/kindle-dashboard-nas');state.mkdir(exist_ok=True);state.chmod(0o700)
+    state=Path(args.state).resolve() if args.state else project/'security-staging/maintenance-private'
+    if any(state.is_relative_to(project/name) for name in ('data','proxy','mtproto')):
+        raise SystemExit('维护状态不能放入 Web 或转发容器的共享目录')
+    state.mkdir(parents=True,exist_ok=True);state.chmod(0o700)
     if args.current_commit:
         if not re.fullmatch(r'[0-9a-f]{40}',args.current_commit):raise SystemExit('提交编号无效')
         (state/'current.json').write_text(json.dumps({'commit':args.current_commit}))
@@ -44,7 +48,7 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-ExecStart=/usr/bin/python3 {script} --project {project}
+ExecStart=/usr/bin/python3 {script} --project {project} --state {state}
 Restart=on-failure
 RestartSec=15
 Environment=PYTHONUNBUFFERED=1
@@ -57,7 +61,7 @@ UMask=0077
 
 [Install]
 WantedBy=multi-user.target
-'''.format(script=json.dumps(str(project/'scripts/maintenance_worker.py')),project=json.dumps(str(project)))
+'''.format(script=json.dumps(str(project/'scripts/maintenance_worker.py')),project=json.dumps(str(project)),state=json.dumps(str(state)))
     Path('/etc/systemd/system/kindle-maintenance.service').write_text(unit)
     subprocess.run(['systemctl','daemon-reload'],check=True)
     subprocess.run(['systemctl','enable','--now','kindle-maintenance.service'],check=True)

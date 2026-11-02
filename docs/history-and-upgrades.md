@@ -1,6 +1,6 @@
 # 流量历史与组件升级
 
-后台新增「流量统计」「组件升级」，沿用现有管理员登录。
+后台新增「流量统计」「组件升级」，使用网页内登录表单和可撤销的会话 Cookie，不再触发浏览器认证弹窗；沿用现有管理员账号。
 
 ## 每小时自动选择
 
@@ -24,7 +24,7 @@
 sudo python3 scripts/install-maintenance.py --project "$PWD" --current-commit <已部署的40位提交SHA>
 ```
 
-要求 systemd、Docker Compose、出站访问 GitHub/镜像源和足够磁盘。维护服务为 kindle-maintenance.service；私有回退及构建状态存放 /var/lib/kindle-dashboard-nas，权限 700。Web 容器没有 Docker socket，仅能提交固定的 upgrade/rollback 请求。
+要求 systemd、Docker Compose、出站访问 GitHub/镜像源和足够磁盘。维护服务为 kindle-maintenance.service；私有回退及构建状态存放 项目的 security-staging/maintenance-private（数据盘上），权限 700。Web 容器没有 Docker socket，仅能提交固定的 upgrade/rollback 请求。
 
 「组件升级」显示后台、Mihomo、Python、Pillow、PyCryptodome、PySocks 的实际版本。手动检查读取固定仓库 Viper-Boss/kindle-dashboard-nas 的 main；升级该仓库锁定的组件组合，不会用不兼容的官方 latest 覆盖定制内核。
 
@@ -33,3 +33,7 @@ sudo python3 scripts/install-maintenance.py --project "$PWD" --current-commit <�
 升级前备份源码、私有配置、SQLite 和镜像引用；部署保留现有 .env、订阅、密钥、代理配置及流量历史。手动回退保留当前历史数据并暂停自动同步，避免马上再次升级。重新开启可在页面操作。日志仅管理员可读，不接受任意命令、地址或文件路径。
 
 迁移后请按上述命令在新 NAS 重新安装宿主机服务；迁移包不携带 systemd 安装状态。历史数据库也应定期通过私有迁移包另存。
+
+## 网页登录
+
+打开 /admin 后自动跳转 /login，支持密码显示、错误提示、7 天保持登录和退出登录。会话令牌仅保存在 HttpOnly、SameSite=Strict Cookie；数据库只保留其 SHA-256 摘要，退出立即撤销，更换 .env 中账号密码会使已有会话失效。默认会话 12 小时；失败登录按来源 IP 限制为每 15 分钟 10 次。历史脚本主动发送 Basic Authorization 仍受原账号验证，但所有接口均不发送 WWW-Authenticate，浏览器页面仅使用会话登录。登录账号沿用 NAS 私有 .env 中 ADMIN_USERNAME / ADMIN_PASSWORD，不进入公开源码。通过 HTTPS 反向代理时可设置 COOKIE_SECURE=1。

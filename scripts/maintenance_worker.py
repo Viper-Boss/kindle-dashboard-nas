@@ -404,12 +404,12 @@ def secrets_token():
 
 
 def main():
-    parser=argparse.ArgumentParser();parser.add_argument('--project',required=True);parser.add_argument('--state',default='/var/lib/kindle-dashboard-nas');parser.add_argument('--once',action='store_true')
+    parser=argparse.ArgumentParser();parser.add_argument('--project',required=True);parser.add_argument('--state');parser.add_argument('--once',action='store_true')
     args=parser.parse_args();project=Path(args.project).resolve()
     if os.geteuid()!=0:raise SystemExit('NAS maintenance worker must be installed by root')
     os.environ['KINDLE_DATA_ROOT']=str(project/'data');sys.path.insert(0,str(project))
     import maintenance
-    state=Path(args.state);state.mkdir(parents=True,exist_ok=True);state.chmod(0o700)
+    state=Path(args.state) if args.state else project/'security-staging/maintenance-private';state.mkdir(parents=True,exist_ok=True);state.chmod(0o700)
     with open(state/'worker.lock','w') as lock:
         fcntl.flock(lock,fcntl.LOCK_EX|fcntl.LOCK_NB)
         Worker(project,state,maintenance).loop(args.once)
