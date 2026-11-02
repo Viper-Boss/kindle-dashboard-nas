@@ -1718,6 +1718,11 @@ async def handle_client(reader_clt, writer_clt):
 
 
 async def handle_client_wrapper(reader, writer):
+    import access_control  # 外网访问开关：关闭时只接受局域网来源
+    peer = writer.get_extra_info("peername")
+    if not access_control.check("telegram", peer[0] if peer else ""):
+        writer.transport.abort()
+        return
     try:
         await handle_client(reader, writer)
     except (asyncio.IncompleteReadError, asyncio.CancelledError):

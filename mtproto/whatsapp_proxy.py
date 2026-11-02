@@ -7,8 +7,13 @@ import asyncio
 import errno
 import ipaddress
 import json
+import os
 import socket
+import sys
 import time
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import access_control  # noqa: E402
 
 STATE = {'enabled': True, 'startedAt': None, 'active': 0, 'accepted': 0,
          'upstreamConnected': 0, 'failed': 0, 'uploadBytes': 0,
@@ -86,6 +91,10 @@ async def pump(reader, writer, direction):
 
 
 async def relay(reader, writer, role):
+    peer = writer.get_extra_info('peername')
+    if not access_control.check('whatsapp', peer[0] if peer else ''):
+        writer.close()  # 外网访问开关已关闭，且来源不是局域网
+        return
     if STATE['active'] >= MAX_CONNECTIONS:
         writer.close()
         return
@@ -93,12 +102,14 @@ async def relay(reader, writer, role):
     STATE['accepted'] += 1
     upstream = None
     tasks = []
+    connected = False
     try:
         target, port = ('g.whatsapp.net', 5222) if role == 'chat' else ('whatsapp.net', 443)
         incoming, upstream = await connect_socks(target, port)
         if role == 'chat':
             upstream.write(proxy_header(writer.get_extra_info('peername')))
             await upstream.drain()
+        connected = True
         STATE['upstreamConnected'] += 1
         STATE['lastConnectedAt'] = time.time()
         STATE['lastError'] = ''
@@ -111,6 +122,11 @@ async def relay(reader, writer, role):
             task.cancel()
     except asyncio.CancelledError:
         raise
+    except (asyncio.TimeoutError, ConnectionResetError, BrokenPipeError) as error:
+        # 已连上后的空闲超时、客户端断开属于正常结束；连接阶段的这类错误仍算失败。
+        if not connected:
+            STATE['failed'] += 1
+            STATE['lastError'] = str(error)[:200] or type(error).__name__
     except Exception as error:
         STATE['failed'] += 1
         STATE['lastError'] = str(error)[:200] or type(error).__name__
@@ -137,7 +153,7 @@ async def health(reader, writer):
         if path != b'/status':
             writer.write(b'HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n')
         else:
-            payload = json.dumps(STATE).encode()
+            payload = json.dumps(dict(STATE, access=access_control.snapshot())).encode()
             writer.write(('HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: %d\r\nConnection: close\r\n\r\n' % len(payload)).encode() + payload)
         await writer.drain()
     except Exception:

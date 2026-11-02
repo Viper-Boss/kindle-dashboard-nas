@@ -26,6 +26,12 @@ docker compose up -d
 
 DASH_IMAGE=$(docker inspect kindle-dashboard --format '{{.Config.Image}}')
 PROXY_IMAGE=$(docker inspect kindle-dashboard-proxy --format '{{.Config.Image}}')
+MTPROTO_IMAGE=$(docker inspect nas-mtproto --format '{{.Config.Image}}' 2>/dev/null || true)
+IMAGES="$DASH_IMAGE $PROXY_IMAGE"
+if [ -n "$MTPROTO_IMAGE" ]; then
+  IMAGES="$IMAGES $MTPROTO_IMAGE"
+  printf '%s\n' "$MTPROTO_IMAGE" > "$WORK_DIR/mtproto-image.txt"
+fi
 
 echo "[2/4] 复制项目和私有配置……"
 tar \
@@ -38,10 +44,12 @@ tar \
   -C "$PROJECT_DIR" -cf - . | tar -C "$BUNDLE_DIR/project" -xf -
 
 echo "[3/4] 导出 Docker 镜像（可能需要几分钟）……"
-docker save -o "$BUNDLE_DIR/images.tar" "$DASH_IMAGE" "$PROXY_IMAGE"
+# shellcheck disable=SC2086  # IMAGES 需要按空格拆分
+docker save -o "$BUNDLE_DIR/images.tar" $IMAGES
 
 printf '%s\n' "$DASH_IMAGE" > "$BUNDLE_DIR/dashboard-image.txt"
 printf '%s\n' "$PROXY_IMAGE" > "$BUNDLE_DIR/proxy-image.txt"
+[ -f "$WORK_DIR/mtproto-image.txt" ] && cp "$WORK_DIR/mtproto-image.txt" "$BUNDLE_DIR/mtproto-image.txt"
 cp "$SCRIPT_DIR/import-migration.sh" "$BUNDLE_DIR/install.sh"
 chmod +x "$BUNDLE_DIR/install.sh"
 

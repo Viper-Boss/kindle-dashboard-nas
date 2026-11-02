@@ -27,7 +27,10 @@ docker load -i "$SCRIPT_DIR/images.tar"
 
 echo "[3/4] 启动容器……"
 cd "$TARGET_DIR"
-docker compose up -d --no-build
+if ! docker compose up -d --no-build; then
+  echo "部分镜像不在迁移包里，改为在本机构建（需要联网）……"
+  docker compose up -d
+fi
 
 echo "[4/4] 等待健康检查……"
 i=0

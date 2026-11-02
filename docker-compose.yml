@@ -60,6 +60,7 @@ services:
     - "${WHATSAPP_IPV6_BIND_IP:-[::]}:7777:7777/tcp"
     volumes:
     - ./mtproto:/app:ro
+    - ./proxy:/proxy:ro
     read_only: true
     tmpfs:
     - /tmp

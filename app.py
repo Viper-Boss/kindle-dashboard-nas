@@ -5,20 +5,23 @@ import html
 import io
 import json
 import os
+import re
 import socket
+import threading
 import time
 import traceback
 import urllib.error
 import urllib.parse
 import urllib.request
 from datetime import datetime, timedelta, timezone
+from functools import lru_cache
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
 
 from PIL import Image, ImageDraw, ImageFont
 from admin_ui import enhance_admin_page
-from proxy_admin import section as proxy_admin_section, handle as proxy_handle, save_and_reload, managed_config
+from proxy_admin import section as proxy_admin_section, handle as proxy_handle, save_and_reload, telegram_rule_lines
 
 
 WIDTH = int(os.getenv("DASHBOARD_WIDTH", "600"))
@@ -51,6 +54,8 @@ WEEKDAYS_CN = ("周一", "周二", "周三", "周四", "周五", "周六", "周�
 LAST_DATA: dict[str, Any] = {}
 LAST_IMAGE: bytes | None = None
 LAST_RENDER_TS = 0.0
+RENDER_LOCK = threading.Lock()   # 同一时间只允许一个线程去拉取数据并渲染
+FILE_LOCK = threading.Lock()     # 状态文件 / 配置文件的写入锁
 
 
 def load_runtime_config() -> dict[str, Any]:
@@ -62,14 +67,15 @@ def load_runtime_config() -> dict[str, Any]:
 
 
 def save_runtime_config(config: dict[str, Any]) -> None:
-    CONFIG_FILE.parent.mkdir(parents=True, exist_ok=True)
-    temp = CONFIG_FILE.with_suffix(CONFIG_FILE.suffix + ".tmp")
-    temp.write_text(json.dumps(config, ensure_ascii=False, indent=2), encoding="utf-8")
-    temp.replace(CONFIG_FILE)
-    try:
-        os.chmod(CONFIG_FILE, 0o600)
-    except OSError:
-        pass
+    with FILE_LOCK:
+        CONFIG_FILE.parent.mkdir(parents=True, exist_ok=True)
+        temp = CONFIG_FILE.with_suffix(CONFIG_FILE.suffix + ".tmp")
+        temp.write_text(json.dumps(config, ensure_ascii=False, indent=2), encoding="utf-8")
+        try:
+            os.chmod(temp, 0o600)
+        except OSError:
+            pass
+        temp.replace(CONFIG_FILE)
 
 
 def setting(name: str, default: str = "") -> str:
@@ -158,11 +164,14 @@ def load_state() -> dict[str, Any]:
 
 
 def save_state(updates: dict[str, Any]) -> dict[str, Any]:
-    state = load_state()
-    state.update({k: v for k, v in updates.items() if v is not None and v != ""})
-    state["updated_at"] = local_now().isoformat(timespec="seconds")
-    STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
-    STATE_FILE.write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
+    with FILE_LOCK:
+        state = load_state()
+        state.update({k: v for k, v in updates.items() if v is not None and v != ""})
+        state["updated_at"] = local_now().isoformat(timespec="seconds")
+        STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
+        temp = STATE_FILE.with_suffix(STATE_FILE.suffix + ".tmp")
+        temp.write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
+        temp.replace(STATE_FILE)
     return state
 
 
@@ -754,304 +763,315 @@ def wrap_text(draw: ImageDraw.ImageDraw, text: str, font: ImageFont.ImageFont, m
     return lines
 
 
-def draw_box(draw: ImageDraw.ImageDraw, xy: tuple[int, int, int, int], title: str, lines: list[str]) -> None:
-    x1, y1, x2, y2 = xy
-    draw.rounded_rectangle(xy, radius=12, outline=0, width=3, fill=255)
-    title_font = find_font(26, bold=True)
-    body_font = find_font(21)
-    draw.text((x1 + 18, y1 + 12), title, font=title_font, fill=0)
-    y = y1 + 54
-    max_width = x2 - x1 - 36
-    line_height = 28
-    for line in lines:
-        for wrapped in wrap_text(draw, line, body_font, max_width):
-            if y + line_height > y2 - 10:
-                return
-            draw.text((x1 + 18, y), wrapped, font=body_font, fill=0)
-            y += line_height
+# ---------------------------------------------------------------------------
+# Kindle 数据屏渲染（600x800 灰度 PNG）
+# 以 3 倍分辨率绘制再缩小，得到抗锯齿的线条和文字；最终量化为 16 级灰度，
+# 这正是电子墨水屏的原生色阶。DASHBOARD_MONOCHROME=1 可退回纯黑白。
+# ---------------------------------------------------------------------------
+DASH_SS = 3
+GRAY_TRACK = 224   # 进度条底色
+GRAY_SOFT = 238    # 走势图面积
+GRAY_LINE = 200    # 分隔线
+GRAY_MUTED = 96    # 次要文字
+DESIGN_W, DESIGN_H = 600, 800
 
 
-def draw_card(draw: ImageDraw.ImageDraw, xy: tuple[int, int, int, int], title: str) -> None:
-    x1, y1, x2, y2 = xy
-    draw.rounded_rectangle(xy, radius=14, outline=0, width=3, fill=255)
-    draw.text((x1 + 18, y1 + 12), title, font=find_font(26, bold=True), fill=0)
+@lru_cache(maxsize=64)
+def _font(px: int, bold: bool) -> Any:
+    return find_font(px, bold=bold)
 
 
-def draw_dashed_line(
-    draw: ImageDraw.ImageDraw,
-    points: list[tuple[int, int]],
-    width: int = 3,
-    dash_every: int = 2,
-) -> None:
-    for idx in range(len(points) - 1):
-        if idx % dash_every == 0:
-            draw.line((points[idx], points[idx + 1]), fill=0, width=width)
+class _Canvas:
+    """按逻辑像素作画、内部放大 DASH_SS 倍的小画布。"""
+
+    def __init__(self, width: int, height: int) -> None:
+        self.img = Image.new("L", (width * DASH_SS, height * DASH_SS), 255)
+        self.d = ImageDraw.Draw(self.img)
+
+    @staticmethod
+    def _pt(p: tuple[float, float]) -> tuple[float, float]:
+        return (p[0] * DASH_SS, p[1] * DASH_SS)
+
+    def rect(self, xy, radius=0, fill=None, outline=None, width=1) -> None:
+        x1, y1, x2, y2 = (v * DASH_SS for v in xy)
+        self.d.rounded_rectangle(
+            (x1, y1, x2 - 1, y2 - 1), radius=radius * DASH_SS, fill=fill,
+            outline=outline, width=max(1, round(width * DASH_SS)),
+        )
+
+    def line(self, pts, fill=0, width=1, round_caps=False) -> None:
+        scaled = [self._pt(p) for p in pts]
+        w = max(1, round(width * DASH_SS))
+        self.d.line(scaled, fill=fill, width=w, joint="curve")
+        if round_caps:
+            r = w / 2
+            for x, y in (scaled[0], scaled[-1]):
+                self.d.ellipse((x - r, y - r, x + r, y + r), fill=fill)
+
+    def dashed(self, x1, x2, y, fill=150, width=1, dash=5, gap=4) -> None:
+        x = x1
+        while x < x2:
+            self.line([(x, y), (min(x + dash, x2), y)], fill=fill, width=width)
+            x += dash + gap
+
+    def poly(self, pts, fill) -> None:
+        self.d.polygon([self._pt(p) for p in pts], fill=fill)
+
+    def circle(self, cx, cy, r, fill=None, outline=None, width=1) -> None:
+        s = DASH_SS
+        self.d.ellipse(
+            ((cx - r) * s, (cy - r) * s, (cx + r) * s, (cy + r) * s),
+            fill=fill, outline=outline, width=max(1, round(width * s)),
+        )
+
+    def text(self, x, y, s, size, bold=False, fill=0, anchor="ls") -> None:
+        self.d.text((x * DASH_SS, y * DASH_SS), str(s), font=_font(round(size * DASH_SS), bold),
+                    fill=fill, anchor=anchor)
+
+    def tw(self, s, size, bold=False) -> float:
+        return self.d.textlength(str(s), font=_font(round(size * DASH_SS), bold)) / DASH_SS
+
+    def fit(self, s, size, max_w, bold=False) -> str:
+        s = str(s).replace("\n", " ").strip()
+        if self.tw(s, size, bold) <= max_w:
+            return s
+        while s and self.tw(s + "…", size, bold) > max_w:
+            s = s[:-1]
+        return s + "…"
+
+    def finish(self, width: int, height: int) -> Image.Image:
+        return self.img.resize((width, height), Image.LANCZOS)
 
 
-def draw_sparkline(
-    draw: ImageDraw.ImageDraw,
-    xy: tuple[int, int, int, int],
-    values: list[float],
-    name: str,
-    price_text: str,
-    change_text: str,
-    dashed: bool = False,
-) -> None:
-    x1, y1, x2, y2 = xy
-    label_font = find_font(22, bold=True)
-    body_font = find_font(20)
-    tiny_font = find_font(15)
+def _data_time(data: dict[str, Any]) -> datetime:
+    try:
+        return datetime.fromisoformat(str(data.get("generated_at")))
+    except Exception:
+        return local_now()
 
-    draw.text((x1, y1), name, font=label_font, fill=0)
-    right = f"{price_text}  {change_text}"
-    draw.text((x2 - text_width(draw, right, body_font), y1 + 2), right, font=body_font, fill=0)
 
-    chart_top = y1 + 32
-    chart_bottom = y2
-    draw.line((x1, chart_bottom, x2, chart_bottom), fill=0, width=2)
-    draw.line((x1, chart_top, x1, chart_bottom), fill=0, width=2)
-    draw.line((x1, (chart_top + chart_bottom) // 2, x2, (chart_top + chart_bottom) // 2), fill=180, width=1)
+def _battery_level(value: Any) -> float | None:
+    if value is None or str(value).strip() == "":
+        return None
+    try:
+        return clamp(float(str(value).strip().rstrip("%")), 0, 100)
+    except ValueError:
+        return None
 
-    clean = [v for v in values if isinstance(v, (int, float))]
-    if len(clean) < 2:
-        draw.text((x1 + 12, chart_top + 12), "waiting for chart data", font=tiny_font, fill=0)
+
+def _draw_header(c: _Canvas, data: dict[str, Any], now: datetime) -> None:
+    clock = now.strftime("%H:%M")
+    c.text(24, 58, clock, 54, bold=True)
+    x = 24 + c.tw(clock, 54, True) + 18
+    c.line([(x, 22), (x, 60)], fill=GRAY_LINE, width=2)
+    c.text(x + 16, 40, f"{now.month}月{now.day}日", 22, bold=True)
+    c.text(x + 16, 60, WEEKDAYS_CN[now.weekday()].replace("周", "星期"), 17, fill=GRAY_MUTED)
+
+    kindle_state = data.get("kindle", {}) if isinstance(data.get("kindle"), dict) else {}
+    level = _battery_level(
+        os.getenv("KINDLE_BATTERY_TEXT") or kindle_state.get("kindle_battery") or kindle_state.get("battery")
+    )
+    # 电池图标：右对齐，文字在图标左侧
+    bx2 = 576
+    bx1 = bx2 - 40
+    by1, by2 = 31, 51
+    c.rect((bx1, by1, bx2 - 4, by2), radius=4, fill=255, outline=0, width=2)
+    c.rect((bx2 - 4, by1 + 6, bx2, by2 - 6), radius=1, fill=0)
+    if level is not None and level > 0:
+        inner = (bx2 - 4 - 4) - (bx1 + 4)
+        c.rect((bx1 + 4, by1 + 4, bx1 + 4 + max(3, inner * level / 100), by2 - 4), radius=1, fill=0)
+    label = "--" if level is None else f"{level:.0f}%"
+    c.text(bx1 - 10, 48, label, 21, bold=True, anchor="rs")
+    c.line([(24, 78), (576, 78)], fill=0, width=2.5)
+
+
+def _change_pill(c: _Canvas, right: float, cy: float, change: float | None) -> None:
+    h = 26
+    top, bottom = cy - h / 2, cy + h / 2
+    if change is None:
+        label = "--"
+        w = c.tw(label, 15, True) + 24
+        c.rect((right - w, top, right, bottom), radius=h / 2, outline=0, width=2)
+        c.text(right - w / 2, cy + 5.5, label, 15, bold=True, anchor="ms")
         return
-
-    lo = min(clean)
-    hi = max(clean)
-    span = hi - lo or max(abs(hi), 1.0) * 0.01
-    points: list[tuple[int, int]] = []
-    for idx, value in enumerate(clean):
-        x = int(x1 + idx * (x2 - x1) / max(1, len(clean) - 1))
-        y = int(chart_bottom - (value - lo) / span * (chart_bottom - chart_top))
-        points.append((x, y))
-
-    if dashed:
-        draw_dashed_line(draw, points, width=3)
+    up = change >= 0
+    label = f"{abs(change):.2f}%"
+    tri = 10
+    w = 14 + tri + 6 + c.tw(label, 15, True) + 14
+    fg = 255 if up else 0
+    if up:
+        c.rect((right - w, top, right, bottom), radius=h / 2, fill=0)
     else:
-        draw.line(points, fill=0, width=3)
-
-    draw.ellipse((points[-1][0] - 4, points[-1][1] - 4, points[-1][0] + 4, points[-1][1] + 4), fill=0)
-    range_text = f"{money(lo)}-{money(hi)}"
-    draw.text((x2 - text_width(draw, range_text, tiny_font), chart_bottom - 18), range_text, font=tiny_font, fill=0)
-
-
-def draw_usage_bar(draw: ImageDraw.ImageDraw, xy: tuple[int, int, int, int], usage: dict[str, Any]) -> None:
-    x1, y1, x2, y2 = xy
-    label_font = find_font(22, bold=True)
-    body_font = find_font(18)
-    label = str(usage.get("label", "--"))
-    percent = usage.get("percent")
-    text = str(usage.get("text", ""))
-
-    draw.text((x1, y1), label, font=label_font, fill=0)
-    if percent is None:
-        pct_text = "--"
+        c.rect((right - w, top, right, bottom), radius=h / 2, fill=255, outline=0, width=2)
+    tx = right - w + 14
+    if up:
+        c.poly([(tx + tri / 2, cy - 4.5), (tx, cy + 4), (tx + tri, cy + 4)], fill=fg)
     else:
-        pct_text = f"{percent:.0f}%"
-    draw.text((x2 - text_width(draw, pct_text, label_font), y1), pct_text, font=label_font, fill=0)
-
-    if text:
-        line = wrap_text(draw, text, body_font, x2 - x1)[0]
-        draw.text((x1, y1 + 28), line, font=body_font, fill=0)
-
-    bar_top = y1 + 54
-    bar_bottom = y1 + 80
-    draw.rounded_rectangle((x1, bar_top, x2, bar_bottom), radius=8, outline=0, width=2, fill=255)
-    for tick in (25, 50, 75):
-        tx = int(x1 + (x2 - x1) * tick / 100)
-        draw.line((tx, bar_top, tx, bar_bottom), fill=0, width=1)
-    if percent is not None:
-        fill_right = int(x1 + (x2 - x1) * clamp(percent, 0, 100) / 100)
-        if fill_right > x1 + 4:
-            draw.rounded_rectangle((x1 + 3, bar_top + 3, fill_right, bar_bottom - 3), radius=6, fill=0)
-    else:
-        draw.line((x1 + 8, (bar_top + bar_bottom) // 2, x2 - 8, (bar_top + bar_bottom) // 2), fill=0, width=2)
+        c.poly([(tx, cy - 4), (tx + tri, cy - 4), (tx + tri / 2, cy + 4.5)], fill=fg)
+    c.text(tx + tri + 6, cy + 5.5, label, 15, bold=True, fill=fg)
 
 
-def draw_mini_sparkline(
-    draw: ImageDraw.ImageDraw,
-    xy: tuple[int, int, int, int],
-    values: list[float],
-    dashed: bool = False,
-) -> None:
-    x1, y1, x2, y2 = xy
+def _smooth(values: list[float], limit: int = 96) -> list[float]:
+    if len(values) <= limit:
+        return values
+    step = len(values) / limit
+    out = []
+    for i in range(limit):
+        chunk = values[int(i * step): max(int(i * step) + 1, int((i + 1) * step))]
+        out.append(sum(chunk) / len(chunk))
+    out[-1] = values[-1]
+    return out
+
+
+def _draw_sparkline(c: _Canvas, box, values: list[float]) -> None:
+    x1, y1, x2, y2 = box
     clean = [float(v) for v in values if isinstance(v, (int, float))]
     if len(clean) < 2:
-        draw.text((x1 + 4, y1 + 8), "等待数据", font=find_font(14), fill=0)
+        c.text((x1 + x2) / 2, (y1 + y2) / 2 + 5, "等待走势数据", 14, fill=GRAY_MUTED, anchor="ms")
         return
+    clean = _smooth(clean)
+    lo, hi = min(clean), max(clean)
+    span = (hi - lo) or max(abs(hi), 1.0) * 0.01
+    pad = 5
+    top, bottom = y1 + pad, y2 - pad
 
-    lo = min(clean)
-    hi = max(clean)
-    span = hi - lo or 1
-    points: list[tuple[int, int]] = []
-    for idx, value in enumerate(clean):
-        x = int(x1 + idx * (x2 - x1) / max(1, len(clean) - 1))
-        y = int(y2 - (value - lo) / span * (y2 - y1))
-        points.append((x, y))
+    def y_of(v: float) -> float:
+        return bottom - (v - lo) / span * (bottom - top)
 
-    draw.line((x1, (y1 + y2) // 2, x2, (y1 + y2) // 2), fill=160, width=1)
-    if dashed:
-        draw_dashed_line(draw, points, width=3)
-    else:
-        draw.line(points, fill=0, width=3)
-    px, py = points[-1]
-    draw.ellipse((px - 4, py - 4, px + 4, py + 4), fill=0)
-
-
-def draw_coin_tile(
-    draw: ImageDraw.ImageDraw,
-    xy: tuple[int, int, int, int],
-    name: str,
-    price: str,
-    change: str,
-    values: list[float],
-    dashed: bool = False,
-) -> None:
-    x1, y1, x2, y2 = xy
-    draw.rounded_rectangle(xy, radius=13, outline=0, width=3, fill=255)
-    draw.text((x1 + 16, y1 + 12), name, font=find_font(28, bold=True), fill=0)
-    draw.text((x1 + 16, y1 + 50), price, font=find_font(23, bold=True), fill=0)
-    draw.text((x1 + 16, y1 + 81), change, font=find_font(17), fill=0)
-    draw_mini_sparkline(draw, (x1 + 16, y1 + 112, x2 - 16, y2 - 18), values, dashed=dashed)
+    pts = [(x1 + i * (x2 - x1 - 6) / (len(clean) - 1), y_of(v)) for i, v in enumerate(clean)]
+    c.poly(pts + [(pts[-1][0], y2), (pts[0][0], y2)], fill=GRAY_SOFT)
+    c.dashed(x1, x2, y_of(clean[0]), fill=150)          # 24h 前的起点价位
+    c.line(pts, fill=0, width=2.6, round_caps=True)
+    px, py = pts[-1]
+    c.circle(px, py, 6, fill=255)
+    c.circle(px, py, 4.2, fill=0)
 
 
-def draw_quota_bar(
-    draw: ImageDraw.ImageDraw,
-    x: int,
-    y: int,
-    width: int,
-    item: dict[str, Any],
-    compact: bool = False,
-) -> None:
-    label_font = find_font(18 if compact else 19, bold=True)
-    text_font = find_font(13 if compact else 14)
+def _draw_coin(c: _Canvas, box, symbol: str, name: str, quote: dict[str, Any], values: list[float]) -> None:
+    x1, y1, x2, y2 = box
+    c.rect(box, radius=16, fill=255, outline=0, width=2)
+    c.text(x1 + 16, y1 + 36, symbol, 22, bold=True)
+    c.text(x1 + 16 + c.tw(symbol, 22, True) + 8, y1 + 36, name, 14, fill=GRAY_MUTED)
+    _change_pill(c, x2 - 14, y1 + 28, safe_float(quote.get("eur_24h_change")))
+
+    price = money(quote.get("eur"))
+    c.text(x1 + 16, y1 + 82, price, 34, bold=True)
+    c.text(x1 + 16 + c.tw(price, 34, True) + 7, y1 + 82, "EUR", 15, fill=GRAY_MUTED)
+
+    _draw_sparkline(c, (x1 + 16, y1 + 94, x2 - 16, y2 - 34), values)
+
+    clean = [float(v) for v in values if isinstance(v, (int, float))]
+    if len(clean) >= 2:
+        rng = f"24h  {money(min(clean))} – {money(max(clean))}"
+        c.text(x1 + 16, y2 - 13, rng, 13, fill=GRAY_MUTED)
+
+
+def _draw_quota_row(c: _Canvas, x1: float, x2: float, top: float, item: dict[str, Any]) -> None:
     label = str(item.get("label", "--"))
-    raw_percent = item.get("percent")
-    percent = clamp(float(raw_percent or 0), 0, 100)
     note = str(item.get("text", ""))
-    pct_text = f"{percent:.0f}%" if raw_percent is not None else "实时"
+    raw = item.get("percent")
+    percent = clamp(float(raw or 0), 0, 100)
+    pct_text = f"{percent:.0f}%" if raw is not None else "实时"
 
-    draw.text((x, y), label, font=label_font, fill=0)
-    draw.text((x + width - text_width(draw, pct_text, label_font), y), pct_text, font=label_font, fill=0)
+    left_w = 100
+    c.text(x1, top + 17, label, 18, bold=True)
     if note:
-        draw.text((x, y + 23), note[:16], font=text_font, fill=0)
+        c.text(x1, top + 34, c.fit(note, 13, left_w), 13, fill=GRAY_MUTED)
 
-    bar_top = y + 45
-    bar_bottom = y + 69
-    draw.rounded_rectangle((x, bar_top, x + width, bar_bottom), radius=7, outline=0, width=2, fill=255)
-    for tick in (25, 50, 75):
-        tx = x + int(width * tick / 100)
-        draw.line((tx, bar_top, tx, bar_bottom), fill=0, width=1)
+    pct_w = 72   # 为 "100%" 反白胶囊预留
+    bx1, bx2 = x1 + left_w + 6, x2 - pct_w - 8
+    by1, by2 = top + 13, top + 27
+    c.rect((bx1, by1, bx2, by2), radius=7, fill=GRAY_TRACK)
     if percent > 0:
-        fill_right = x + int(width * percent / 100)
-        draw.rounded_rectangle((x + 3, bar_top + 3, max(x + 5, fill_right), bar_bottom - 3), radius=5, fill=0)
+        c.rect((bx1, by1, bx1 + max(14, (bx2 - bx1) * percent / 100), by2), radius=7, fill=0)
+
+    if raw is not None and percent >= 80:       # 高用量：反白胶囊提醒
+        w = c.tw(pct_text, 22, True) + 14
+        c.rect((x2 - w, top + 4, x2, top + 30), radius=13, fill=0)
+        c.text(x2 - w / 2, top + 26, pct_text, 22, bold=True, fill=255, anchor="ms")
+    else:
+        c.text(x2, top + 26, pct_text, 22, bold=True, anchor="rs")
 
 
-def draw_quota_section(
-    draw: ImageDraw.ImageDraw,
-    xy: tuple[int, int, int, int],
-    title: str,
-    items: list[dict[str, Any]],
-) -> None:
-    x1, y1, x2, y2 = xy
-    draw.rounded_rectangle(xy, radius=13, outline=0, width=3, fill=255)
-    draw.text((x1 + 16, y1 + 10), title, font=find_font(22, bold=True), fill=0)
+def _draw_quota_card(c: _Canvas, box, chip: str, suffix: str, items: list[dict[str, Any]]) -> None:
+    x1, y1, x2, y2 = box
+    c.rect(box, radius=16, fill=255, outline=0, width=2)
+    chip_w = c.tw(chip, 17, True) + 22
+    c.rect((x1 + 18, y1 + 14, x1 + 18 + chip_w, y1 + 40), radius=13, fill=0)
+    c.text(x1 + 18 + chip_w / 2, y1 + 33, chip, 17, bold=True, fill=255, anchor="ms")
+    c.text(x1 + 18 + chip_w + 10, y1 + 34, suffix, 18, bold=True)
+    c.line([(x1 + 18, y1 + 50), (x2 - 18, y1 + 50)], fill=GRAY_LINE, width=1.5)
+
+    items = list(items)[:4]
     while len(items) < 4:
         items.append({"label": "--", "percent": 0, "text": "未配置"})
-    if len(items) >= 4:
-        draw_quota_bar(draw, x1 + 22, y1 + 48, 226, items[0], compact=True)
-        draw_quota_bar(draw, x1 + 282, y1 + 48, 226, items[1], compact=True)
-        draw_quota_bar(draw, x1 + 22, y1 + 128, 226, items[2], compact=True)
-        draw_quota_bar(draw, x1 + 282, y1 + 128, 226, items[3], compact=True)
-    else:
-        draw_quota_bar(draw, x1 + 22, y1 + 48, 226, items[0], compact=True)
-        draw_quota_bar(draw, x1 + 282, y1 + 48, 226, items[1], compact=True)
-        draw_quota_bar(draw, x1 + 22, y1 + 128, 486, items[2], compact=True)
+    for i, item in enumerate(items):
+        _draw_quota_row(c, x1 + 20, x2 - 20, y1 + 58 + i * 40, item)
 
 
 def render_dashboard(data: dict[str, Any]) -> bytes:
-    img = Image.new("L", (WIDTH, HEIGHT), 255)
-    draw = ImageDraw.Draw(img)
-    title_font = find_font(31, bold=True)
-    top_font = find_font(17)
-    bottom_font = find_font(17)
-
-    top_time = str(data.get("top_time_cn") or chinese_date_week_time(local_now()))
-    kindle_state = data.get("kindle", {}) if isinstance(data.get("kindle"), dict) else {}
-    battery = os.getenv("KINDLE_BATTERY_TEXT") or kindle_state.get("kindle_battery") or kindle_state.get("battery")
-    if battery is None or battery == "":
-        battery_text = "电量：未获取"
-    else:
-        battery_text = f"电量：{battery}" if str(battery).endswith("%") else f"电量：{battery}%"
-
-    draw.text((24, 16), "Kindle数据屏", font=title_font, fill=0)
-    draw.text(((WIDTH - text_width(draw, top_time, top_font)) // 2, 29), top_time, font=top_font, fill=0)
-    draw.text((WIDTH - 24 - text_width(draw, battery_text, top_font), 29), battery_text, font=top_font, fill=0)
-    draw.line((24, 66, WIDTH - 24, 66), fill=0, width=3)
+    c = _Canvas(DESIGN_W, DESIGN_H)
+    now = _data_time(data)
+    _draw_header(c, data, now)
 
     prices = data.get("prices", {}) or {}
-    btc = prices.get("bitcoin", {})
-    eth = prices.get("ethereum", {})
     charts = data.get("charts", {}) or {}
-
-    draw_coin_tile(
-        draw,
-        (24, 84, 288, 256),
-        "BTC",
-        f"{money(btc.get('eur'))} EUR",
-        f"{pct(btc.get('eur_24h_change'))} / 24h",
-        list(charts.get("bitcoin", [])),
-        dashed=False,
-    )
-    draw_coin_tile(
-        draw,
-        (312, 84, 576, 256),
-        "ETH",
-        f"{money(eth.get('eur'))} EUR",
-        f"{pct(eth.get('eur_24h_change'))} / 24h",
-        list(charts.get("ethereum", [])),
-        dashed=True,
-    )
+    _draw_coin(c, (24, 94, 288, 268), "BTC", "Bitcoin", prices.get("bitcoin", {}) or {}, list(charts.get("bitcoin", [])))
+    _draw_coin(c, (312, 94, 576, 268), "ETH", "Ethereum", prices.get("ethereum", {}) or {}, list(charts.get("ethereum", [])))
 
     quotas = data.get("quotas", {}) if isinstance(data.get("quotas"), dict) else quota_blocks()
-    draw_quota_section(draw, (24, 276, 576, 502), "OpenAI API用量", list(quotas.get("codex", [])))
-    draw_quota_section(draw, (24, 518, 576, 744), "Claude API用量", list(quotas.get("claude", [])))
+    _draw_quota_card(c, (24, 282, 576, 508), "OpenAI", "API 用量", list(quotas.get("codex", [])))
+    _draw_quota_card(c, (24, 520, 576, 746), "Claude", "API 用量", list(quotas.get("claude", [])))
 
-    draw.line((24, 756, WIDTH - 24, 756), fill=0, width=2)
-    info_time = str(data.get("generated_at_cn") or chinese_datetime(local_now()))
-    footer = f"信息获取时间：{info_time}"
-    draw.text((24, 770), footer, font=bottom_font, fill=0)
-    eth_cny = "ETH人民币：--"
-    if eth.get("cny") is not None:
-        eth_cny = f"ETH人民币：{money(eth.get('cny'))}元"
-    draw.text((WIDTH - 24 - text_width(draw, eth_cny, bottom_font), 770), eth_cny, font=bottom_font, fill=0)
+    c.line([(24, 759), (576, 759)], fill=0, width=2)
+    stamp = f"更新于 {now.strftime('%m-%d %H:%M')}"
+    if data.get("errors"):
+        stamp += "  ·  部分数据获取失败"
+    c.text(24, 785, stamp, 15, fill=GRAY_MUTED)
+    eth_cny = safe_float(((prices.get("ethereum") or {}) if isinstance(prices, dict) else {}).get("cny"))
+    c.text(576, 785, "ETH ¥--" if eth_cny is None else f"ETH ¥{money(eth_cny)}", 15, bold=True, anchor="rs")
 
-    # Keep pure black/white pixels but encode the PNG as 8-bit grayscale.
-    # Older Kindle eips rejects 1-bit PNG files with "8bit only".
-    img = img.point(lambda p: 255 if p > 180 else 0).convert("L")
+    img = c.finish(DESIGN_W, DESIGN_H)
+    if (WIDTH, HEIGHT) != (DESIGN_W, DESIGN_H):
+        img = img.resize((WIDTH, HEIGHT), Image.LANCZOS)
+    if os.getenv("DASHBOARD_MONOCHROME", "").strip().lower() in ("1", "true", "yes"):
+        img = img.point(lambda p: 255 if p > 180 else 0)
+    else:
+        img = img.point(lambda p: min(255, round(p / 17) * 17))   # 量化到 Kindle 的 16 级灰度
+    # 始终保存为 8 位灰度 PNG：旧版 Kindle 的 eips 不接受 1 位 PNG（"8bit only"）。
     out = io.BytesIO()
-    img.save(out, format="PNG", optimize=True)
+    img.convert("L").save(out, format="PNG", optimize=True)
     return out.getvalue()
 
 
 def get_cached_image() -> bytes:
+    """返回缓存的数据屏图片。
+
+    - 数据（行情、用量）按 CACHE_SECONDS 过期后才重新拉取；
+    - Kindle 上报电量（/update）只会让图片重绘，不会重新请求上游接口；
+    - 加锁，避免多个请求同时过期时重复请求上游。
+    """
     global LAST_DATA, LAST_IMAGE, LAST_RENDER_TS
-    now = time.time()
-    cache_seconds = setting_float("CACHE_SECONDS") or CACHE_SECONDS
-    # After boot the proxy may need several seconds to load its rule database.
-    # Retry failed/empty market renders quickly instead of caching them for 5 minutes.
-    effective_cache = cache_seconds if LAST_DATA.get("prices") else min(cache_seconds, 15)
-    if LAST_IMAGE is None or now - LAST_RENDER_TS > effective_cache:
-        try:
-            LAST_DATA = collect_data()
-            LAST_IMAGE = render_dashboard(LAST_DATA)
-            LAST_RENDER_TS = now
-        except Exception as exc:
-            LAST_DATA = {"ok": False, "errors": [traceback.format_exc()], "generated_at": datetime.now().isoformat()}
-            LAST_IMAGE = render_dashboard({"errors": [str(exc)], "generated_at": datetime.now().isoformat()})
-            LAST_RENDER_TS = now
-    return LAST_IMAGE
+    with RENDER_LOCK:
+        now = time.time()
+        cache_seconds = setting_float("CACHE_SECONDS") or CACHE_SECONDS
+        # After boot the proxy may need several seconds to load its rule database.
+        # Retry failed/empty market renders quickly instead of caching them for 5 minutes.
+        effective_cache = cache_seconds if LAST_DATA.get("prices") else min(cache_seconds, 15)
+        data_expired = not LAST_DATA or now - LAST_RENDER_TS > effective_cache
+        if LAST_IMAGE is None or data_expired:
+            try:
+                if data_expired:
+                    LAST_DATA = collect_data()
+                    LAST_RENDER_TS = now
+                else:
+                    LAST_DATA["kindle"] = load_state()
+                LAST_IMAGE = render_dashboard(LAST_DATA)
+            except Exception as exc:
+                LAST_DATA = {"ok": False, "errors": [traceback.format_exc()], "generated_at": datetime.now().isoformat()}
+                LAST_IMAGE = render_dashboard({"errors": [str(exc)], "generated_at": datetime.now().isoformat()})
+                LAST_RENDER_TS = now
+        return LAST_IMAGE
 
 
 ADMIN_NON_SECRET_FIELDS = (
@@ -1071,13 +1091,23 @@ ADMIN_NON_SECRET_FIELDS = (
 ADMIN_SECRET_FIELDS = ("OPENAI_ADMIN_KEY", "ANTHROPIC_ADMIN_KEY", "MIHOMO_SUBSCRIPTION_URL")
 
 
-def mihomo_subscription_config(subscription_url: str) -> str:
+def current_proxy_mode() -> str:
+    """读取代理内核当前的运行模式，重新生成配置时保持不变。"""
+    try:
+        found = re.search(r"^mode:\s*(rule|global|direct)\s*$", MIHOMO_CONFIG_FILE.read_text(encoding="utf-8"), re.M)
+        return found.group(1) if found else "rule"
+    except Exception:
+        return "rule"
+
+
+def mihomo_subscription_config(subscription_url: str, mode: str = "rule") -> str:
     # JSON quoting is valid YAML quoting and safely preserves URL query parameters.
     escaped_url = json.dumps(subscription_url, ensure_ascii=False)
+    telegram_rules = "\n".join("  - " + rule for rule in telegram_rule_lines())
     return f"""mixed-port: 7890
 allow-lan: true
 bind-address: "*"
-mode: rule
+mode: {mode}
 log-level: warning
 proxy-providers:
   airport:
@@ -1114,16 +1144,29 @@ proxy-groups:
     use:
       - airport
     exclude-filter: "一元机场|请立即|剩余流量|套餐到期"
+  - name: Telegram代理
+    type: select
+    proxies:
+      - 自动选择
+    use:
+      - airport
+    exclude-filter: "一元机场|请立即|剩余流量|套餐到期"
 rules:
+{telegram_rules}
   - DOMAIN-SUFFIX,whatsapp.net,WhatsApp代理
   - MATCH,数据屏代理
 """
 
 
+def admin_password_configured() -> bool:
+    """未设置，或仍是 .env.example 里的占位值 change-me，都视为未配置。"""
+    return os.getenv("ADMIN_PASSWORD", "") not in ("", "change-me")
+
+
 def admin_authorized(headers: Any) -> bool:
     expected_user = os.getenv("ADMIN_USERNAME", "admin")
     expected_password = os.getenv("ADMIN_PASSWORD", "")
-    if not expected_password:
+    if not admin_password_configured():
         return False
     auth = headers.get("Authorization", "")
     if not auth.startswith("Basic "):
@@ -1133,7 +1176,10 @@ def admin_authorized(headers: Any) -> bool:
         username, password = decoded.split(":", 1)
     except Exception:
         return False
-    return hmac.compare_digest(username, expected_user) and hmac.compare_digest(password, expected_password)
+    # compare_digest 对含非 ASCII 的 str 会抛 TypeError，所以统一按字节比较。
+    return hmac.compare_digest(username.encode("utf-8"), expected_user.encode("utf-8")) and hmac.compare_digest(
+        password.encode("utf-8"), expected_password.encode("utf-8")
+    )
 
 
 def html_input(name: str, label: str, value: str = "", input_type: str = "text", placeholder: str = "") -> str:
@@ -1210,6 +1256,8 @@ button{{background:var(--accent);color:white;border:0;border-radius:11px;padding
 
 
 class Handler(BaseHTTPRequestHandler):
+    timeout = 60  # 慢速/挂起的连接不会无限占用线程
+
     def log_message(self, fmt: str, *args: Any) -> None:
         print("%s - - [%s] %s" % (self.client_address[0], self.log_date_time_string(), fmt % args), flush=True)
 
@@ -1221,8 +1269,8 @@ class Handler(BaseHTTPRequestHandler):
         path = parsed.path
 
         if path == "/admin":
-            if not os.getenv("ADMIN_PASSWORD", ""):
-                body = "请先在 .env 设置 ADMIN_PASSWORD，再重启容器。".encode("utf-8")
+            if not admin_password_configured():
+                body = "请先在 .env 设置 ADMIN_PASSWORD（不能为空，也不能是 change-me），再重启容器。".encode("utf-8")
                 self.send_response(503)
                 self.send_header("Content-Type", "text/plain; charset=utf-8")
                 self.send_header("Content-Length", str(len(body)))
@@ -1283,7 +1331,17 @@ class Handler(BaseHTTPRequestHandler):
             self.wfile.write(image)
             return
 
-        if path.startswith("/data.json") or path.startswith("/healthz"):
+        if path.startswith("/healthz"):
+            # 健康检查只确认进程存活，不触发行情/用量接口请求。
+            body = json.dumps({"ok": True, "last_render_age": round(time.time() - LAST_RENDER_TS) if LAST_RENDER_TS else None}).encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
+
+        if path.startswith("/data.json"):
             get_cached_image()
             body = json.dumps(LAST_DATA, ensure_ascii=False, indent=2).encode("utf-8")
             self.send_response(200)
@@ -1323,8 +1381,9 @@ class Handler(BaseHTTPRequestHandler):
             self.send_response(413)
             self.end_headers()
             return
-        form = urllib.parse.parse_qs(self.rfile.read(length).decode("utf-8"), keep_blank_values=True)
-        config = load_runtime_config()
+        form = urllib.parse.parse_qs(self.rfile.read(length).decode("utf-8", "replace"), keep_blank_values=True)
+        previous_config = load_runtime_config()
+        config = dict(previous_config)
         for name in ADMIN_NON_SECRET_FIELDS:
             value = (form.get(name) or [""])[0].strip()
             if value:
@@ -1338,17 +1397,32 @@ class Handler(BaseHTTPRequestHandler):
             value = (form.get(name) or [""])[0].strip()
             if value:
                 config[name] = value
-        subscription_url = str(config.get("MIHOMO_SUBSCRIPTION_URL") or "").strip()
+        # 只有这次确实粘贴了新的订阅链接或 YAML 才改动代理配置；
+        # 仅修改预算等其他设置时不再重写配置，避免把界面里切换的运行模式重置掉。
+        cleared_subscription = (form.get("CLEAR_MIHOMO_SUBSCRIPTION_URL") or [""])[0] == "1"
+        new_subscription = "" if cleared_subscription else (form.get("MIHOMO_SUBSCRIPTION_URL") or [""])[0].strip()
         yaml_text = (form.get("MIHOMO_YAML") or [""])[0].strip()
-        generated_proxy_config = mihomo_subscription_config(subscription_url) if subscription_url else yaml_text
+        if new_subscription:
+            generated_proxy_config = mihomo_subscription_config(new_subscription, current_proxy_mode())
+        else:
+            generated_proxy_config = yaml_text
         if generated_proxy_config:
             try:
                 save_and_reload(generated_proxy_config)
             except Exception:
-                body = '代理配置校验或重载失败，已恢复旧配置；请检查 YAML 后重试。'.encode('utf-8')
+                # 代理配置失败时，其余设置照常保存，只放弃这次的订阅链接。
+                if new_subscription:
+                    if previous_config.get("MIHOMO_SUBSCRIPTION_URL"):
+                        config["MIHOMO_SUBSCRIPTION_URL"] = previous_config["MIHOMO_SUBSCRIPTION_URL"]
+                    else:
+                        config.pop("MIHOMO_SUBSCRIPTION_URL", None)
+                save_runtime_config(config)
+                LAST_IMAGE = None
+                LAST_RENDER_TS = 0
+                body = "代理配置校验或重载失败，已恢复旧配置；其余设置已保存。请检查订阅链接或 YAML 后重试。".encode("utf-8")
                 self.send_response(400)
-                self.send_header('Content-Type', 'text/plain; charset=utf-8')
-                self.send_header('Content-Length', str(len(body)))
+                self.send_header("Content-Type", "text/plain; charset=utf-8")
+                self.send_header("Content-Length", str(len(body)))
                 self.end_headers()
                 self.wfile.write(body)
                 return
