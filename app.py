@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import Any
 
 from PIL import Image, ImageDraw, ImageFont
+from admin_ui import enhance_admin_page
 from proxy_admin import section as proxy_admin_section, handle as proxy_handle, save_and_reload, managed_config
 
 
@@ -1205,7 +1206,7 @@ button{{background:var(--accent);color:white;border:0;border-radius:11px;padding
 <p class="hint">订阅链接或 YAML 都含敏感凭据，请只在局域网后台粘贴，不要发送到聊天中。保存时自动校验并重载内核，无需手动重启；旧配置会自动备份。</p></section>
 <section class="card"><h2>最近错误</h2><pre>{html.escape(error_text)}</pre></section>
 <button type="submit">保存配置并刷新缓存</button></form></div></body></html>"""
-    return page.encode("utf-8")
+    return enhance_admin_page(page).encode("utf-8")
 
 
 class Handler(BaseHTTPRequestHandler):

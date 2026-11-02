@@ -42,3 +42,7 @@ docker compose up -d --build
 ## 许可
 
 本项目采用 [GNU AGPL-3.0](LICENSE)（SPDX: AGPL-3.0-only）。第三方实现保留各自原有许可，详见 THIRD_PARTY.md。
+
+## 管理界面
+
+后台采用浅色工作台，分为运行概览、代理节点、连接服务、活动连接和系统设置。设计依据和验证范围见 [后台设计说明](docs/ADMIN-DESIGN.md)。

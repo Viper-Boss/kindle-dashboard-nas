@@ -21,6 +21,7 @@ services:
     - ./proxy:/proxy
     - ./app.py:/app/app.py:ro
     - ./proxy_admin.py:/app/proxy_admin.py:ro
+    - ./admin_ui.py:/app/admin_ui.py:ro
   mihomo:
     image: metacubex/mihomo:latest
     container_name: kindle-dashboard-proxy

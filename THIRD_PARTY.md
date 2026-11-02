@@ -6,3 +6,5 @@
 - Python 依赖：Pillow、PySocks、PyCryptodome，分别遵循各自上游许可。
 
 本项目新编写的实现采用 GNU Affero General Public License v3.0（AGPL-3.0-only），见根目录 LICENSE。原有第三方 MIT 文件保留其上游许可和版权声明。
+
+- 后台内嵌字体 IBM Plex Sans（Fontsource 提供 WOFF2）：SIL Open Font License，原文见 docs/IBM-Plex-LICENSE.txt。
