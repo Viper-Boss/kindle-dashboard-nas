@@ -57,6 +57,8 @@ def prepare_config(text):
         return text
     if any(g.get('name') != PROBE_GROUP and g.get('port') == PROBE_PORT for g in listeners):
         raise ValueError('服务检测端口已被其他监听器占用')
+    if any(data.get(key) == PROBE_PORT for key in ('mixed-port','port','socks-port','redir-port','tproxy-port')):
+        raise ValueError('服务检测端口与现有代理端口冲突')
     data['proxy-groups'] = [g for g in groups if g.get('name') != PROBE_GROUP] + [group]
     data['listeners'] = [g for g in listeners if g.get('name') != PROBE_GROUP] + [listener]
     return yaml.safe_dump(data, allow_unicode=True, sort_keys=False)
@@ -245,8 +247,9 @@ class Watchdog:
         names = [n for n in obj.get('all', []) if resolve(proxies, n) == n and n != current]
         preferred = [n for n in state['lastGoodNodes'] if n in names]
         rest = [n for n in names if n not in preferred]
-        offset = state['candidateCursor'] % max(len(rest), 1)
-        return (preferred + rest[offset:] + rest[:offset])[:6]
+        ordered = preferred + rest
+        offset = state['candidateCursor'] % max(len(ordered), 1)
+        return (ordered[offset:] + ordered[:offset])[:6]
 
     def check_node(self, service, node, generation):
         with self.lock:
@@ -282,7 +285,7 @@ class Watchdog:
             raise RuntimeError('当前服务没有可检测的代理节点')
         with self.lock:
             if state.get('node') != current:
-                state.update(node=current, failures=0)
+                state.update(node=current, failures=0, candidateCursor=0)
             state.update(candidateIndex=0, candidateTotal=0)
         result = self.check_node(service, current, generation)
         with self.lock:
@@ -334,7 +337,7 @@ class Watchdog:
                 state.update(phase='waiting', reason='其他控制端已换线，下轮重新检测', failures=0)
                 return False
             self.api('/proxies/' + pa.quoted(GROUPS[service]), 'PUT', {'name': node})
-            state.update(node=node, failures=0, phase='healthy', testingNode=None,
+            state.update(node=node, failures=0, phase='healthy', testingNode=None, candidateCursor=0,
                          reason='已固定当前可用节点' if pin else '已切换到通过两次检测的备用节点')
             state['lastGoodNodes'] = ([node] + [n for n in state['lastGoodNodes'] if n != node])[:8]
             if not pin:
@@ -397,6 +400,8 @@ class Watchdog:
             except Exception as e:
                 with self.lock:
                     self.state['engineError'] = str(e)[:180]
+                self.wake.wait(INTERVAL)
+                self.wake.clear()
             self.wake.wait(2)
             self.wake.clear()
 

@@ -126,6 +126,19 @@ class WatchdogTests(unittest.TestCase):
         self.engine.check('telegram')
         self.assertEqual(self.live_writes(), [])
 
+    def test_exhausted_preferred_nodes_do_not_starve_remaining_candidates(self):
+        for node in ['D','E','F','G','H']:
+            self.core.proxies[node] = {'type':'Hysteria2','name':node}
+            self.result[node] = node == 'H'
+        self.result.update(B=False, C=False)
+        self.core.proxies[sw.GROUPS['whatsapp']]['all'] = list('ABCDEFGH')
+        state = self.engine.state['services']['whatsapp']
+        state.update(node='A',failures=2,lastGoodNodes=list('BCDEFG'))
+        self.engine.check('whatsapp')
+        self.assertEqual(self.live_writes(),[])
+        self.engine.check('whatsapp')
+        self.assertEqual(self.core.proxies[sw.GROUPS['whatsapp']]['now'],'H')
+
     def test_external_selection_during_probe_is_not_overwritten(self):
         original = self.engine.tester
         def tester(service):
