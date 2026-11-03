@@ -13,6 +13,7 @@ from unittest.mock import patch
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]))
 import app
 import web_auth
+import maintenance
 
 
 class WebLoginTests(unittest.TestCase):
@@ -22,6 +23,8 @@ class WebLoginTests(unittest.TestCase):
         self.env=patch.dict(os.environ,{'ADMIN_USERNAME':'管理员','ADMIN_PASSWORD':'test-password-秘密'})
         self.env.start(); self.addCleanup(self.env.stop)
         self.db=patch.object(web_auth,'DB_PATH',self.path); self.db.start(); self.addCleanup(self.db.stop)
+        self.maintenance=patch.object(maintenance,'DATA_ROOT',Path(self.temp.name)/'maintenance-data')
+        self.maintenance.start();self.addCleanup(self.maintenance.stop)
 
     def test_cookie_session_survives_reopen_but_is_revoked_at_logout(self):
         session,code=web_auth.login('管理员','test-password-秘密','192.168.1.5',True)
