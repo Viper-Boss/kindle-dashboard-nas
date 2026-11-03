@@ -4,6 +4,8 @@
 The dashboard can request only upgrade/rollback; it cannot supply commands, URLs or paths.
 """
 import argparse
+from contextlib import contextmanager
+import sqlite3
 from datetime import datetime, timezone
 import fcntl
 import hashlib
@@ -85,7 +87,7 @@ class Worker:
         self.project,self.state,self.m=Path(project).resolve(),Path(state).resolve(),maintenance
         self.state.mkdir(parents=True,exist_ok=True);self.state.chmod(0o700)
         self.shared=maintenance.SharedStore(self.project/'data')
-        self.info={'busy':False,'stage':'空闲','heartbeat':time.time(),'rollbackAvailable':bool(self.private('rollback.json'))}
+        self.info={'busy':False,'stage':'空闲','heartbeat':time.time(),'rollbackAvailable':self.rollback_available()}
         self.lock=threading.Lock();self.job=None
         self.proxy='http://'+self.env_settings().get('NAS_BIND_IP','192.168.120.200')+':7890'
         os.environ.update(HTTP_PROXY=self.proxy,HTTPS_PROXY=self.proxy,NO_PROXY='localhost,127.0.0.1')
@@ -109,7 +111,7 @@ class Worker:
         while not self.stop.is_set():
             try:
                 with self.lock:
-                    self.info['heartbeat']=time.time();self.shared.write('status.json',self.info)
+                    self.info['heartbeat']=time.time();self.info['rollbackAvailable']=self.rollback_available();self.shared.write('status.json',self.info)
             except Exception:pass
             self.stop.wait(10)
 
@@ -313,23 +315,54 @@ class Worker:
             time.sleep(2)
         raise RuntimeError('部署后健康检查未通过')
 
+    @contextmanager
+    def account_compatibility(self, backup):
+        previous=read_source(backup/'source','web_auth.py')
+        if previous and b'def account_record(' in previous[0]:
+            yield;return
+        directory,name=source_directory(self.project,'data/auth.sqlite3',True)
+        connection=None;fd=None
+        try:
+            try:fd=os.open(name,os.O_RDWR|os.O_NOFOLLOW|os.O_NONBLOCK,dir_fd=directory)
+            except FileNotFoundError:
+                yield;return
+            if not stat.S_ISREG(os.fstat(fd).st_mode):raise ValueError('账号数据库不是普通文件')
+            connection=sqlite3.connect('file:/proc/self/fd/'+str(fd)+'?mode=rw',uri=True,timeout=10)
+            connection.execute('BEGIN IMMEDIATE')
+            table=connection.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='account'").fetchone()
+            if table and connection.execute('SELECT 1 FROM account WHERE id=1').fetchone():
+                raise ValueError('旧版本不支持当前自定义账号，已阻止回退以保留登录安全设置')
+            yield
+        finally:
+            if connection is not None:connection.close()
+            if fd is not None:os.close(fd)
+            os.close(directory)
+
+    def rollback_available(self):
+        item=self.private('rollback.json')
+        if not item:return False
+        try:
+            with self.account_compatibility(Path(item['directory'])):return True
+        except (OSError,ValueError,sqlite3.Error):return False
+
     def rollback(self):
         item=self.private('rollback.json')
         if not item:raise ValueError('没有可用的回退版本')
         backup=Path(item['directory']).resolve()
         if not backup.is_relative_to((self.state/'backups').resolve()):raise ValueError('回退路径无效')
         self.stage('恢复上次版本（保留流量历史）')
-        for p in (backup/'source').rglob('*'):
-            if p.is_file():
-                name=p.relative_to(backup/'source').as_posix()
-                write_source(self.project,name,p.read_bytes(),stat.S_IMODE(p.stat().st_mode))
-        self.compose('up','-d','--no-build','--force-recreate',extra=backup/'images.json')
-        self.health()
-        current=json.loads((backup/'release.json').read_text());self.save_private('current.json',current)
-        write_source(self.project,'data/deployment.json',json.dumps(current).encode(),0o600)
-        # A manual rollback pauses auto sync so it cannot immediately undo that choice.
-        self.shared.write('settings.json',{'autoSync':False})
-        self.save_private('apply.json',{'pending':False})
+        with self.account_compatibility(backup):
+            for p in (backup/'source').rglob('*'):
+                if p.is_file():
+                    name=p.relative_to(backup/'source').as_posix()
+                    write_source(self.project,name,p.read_bytes(),stat.S_IMODE(p.stat().st_mode))
+            self.compose('up','-d','--no-build','--force-recreate',extra=backup/'images.json')
+            self.health()
+            current=json.loads((backup/'release.json').read_text());self.save_private('current.json',current)
+            write_source(self.project,'data/deployment.json',json.dumps(current).encode(),0o600)
+            # A manual rollback pauses auto sync so it cannot immediately undo that choice.
+            self.shared.write('settings.json',{'autoSync':False})
+            self.save_private('apply.json',{'pending':False})
 
     def upgrade(self):
         self.stage('核对 GitHub 最新版本和安全检查')
@@ -414,7 +447,7 @@ class Worker:
             if job.get('state')=='failed' and job.get('target'):
                 self.save_private('failure.json',{'commit':job['target'],'failedAt':time.time()})
             self.shared.write(job['id']+'.json',job,'jobs')
-            with self.lock:self.info.update(busy=False,stage='空闲',lastJob=job['id'],rollbackAvailable=bool(self.private('rollback.json')))
+            with self.lock:self.info.update(busy=False,stage='空闲',lastJob=job['id'],rollbackAvailable=self.rollback_available())
             self.job=None
 
     def recover_interrupted(self):

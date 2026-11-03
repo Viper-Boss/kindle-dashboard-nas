@@ -192,6 +192,24 @@ class WorkerInputTests(unittest.TestCase):
             self.assertFalse((worker.state/'logging-override.json').exists())
             self.assertFalse(worker.private('logging-pending.json')['pending'])
 
+    def test_legacy_rollback_cannot_reenable_old_credentials_after_account_change(self):
+        module=self.worker_module()
+        import sqlite3
+        with tempfile.TemporaryDirectory() as folder,patch.dict(os.environ):
+            root=Path(folder);project=root/'project';(project/'data').mkdir(parents=True);(project/'.env').write_text('ADMIN_PASSWORD=test-password\n')
+            (project/'app.py').write_text('new-app')
+            with sqlite3.connect(project/'data/auth.sqlite3') as db:
+                db.execute('CREATE TABLE account(id INTEGER PRIMARY KEY)');db.execute('INSERT INTO account VALUES(1)')
+            worker=module.Worker(project,root/'private',maintenance)
+            backup=worker.state/'backups/old';(backup/'source').mkdir(parents=True)
+            (backup/'source/app.py').write_text('legacy-app')
+            worker.save_private('rollback.json',{'directory':str(backup)})
+            self.assertFalse(worker.rollback_available())
+            with patch.object(worker,'compose') as compose:
+                with self.assertRaises(ValueError):worker.rollback()
+                compose.assert_not_called()
+            self.assertEqual((project/'app.py').read_text(),'new-app')
+
     def test_rollback_preserves_history_and_pauses_auto_sync(self):
         module=self.worker_module()
         with tempfile.TemporaryDirectory() as folder,patch.dict(os.environ):

@@ -56,3 +56,5 @@ sudo python3 scripts/install-maintenance.py --project "$PWD" --current-commit <�
 ## 版本显示
 
 「组件升级」显示实际运行的通用代理内核（Mihomo）版本、Telegram/WhatsApp 共用转发程序的本项目版本及依赖版本。当前内核 v1.19.33-security.2 基于官方 v1.19.33，转发程序本项目版本为 1.1.0；转发版本不冒充第三方上游发布版本。
+
+自定义账号启用后，不兼容账号存储格式的旧版本会被禁止回退，避免旧的初始化密码重新获得访问权限。维护任务运行期间暂不接受账号修改。

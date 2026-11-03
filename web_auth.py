@@ -199,6 +199,10 @@ def handle(handler):
         if path == '/auth/account':
             if not session_user(handler.headers):
                 respond(401,{'error':'请先登录'});return True
+            import maintenance
+            store=maintenance.SharedStore()
+            if store.read('status.json',{}).get('busy') or any(store.read(n,{},'jobs').get('state') in ('queued','running') for n in store.names('jobs')):
+                respond(409,{'error':'维护任务正在运行，请完成后再修改账号。'});return True
             code=change_account(data.get('username'),data.get('currentPassword'),data.get('newPassword',''),data.get('confirmation',''),handler.client_address[0])
             if code!=200:
                 respond(code,{'error':'当前密码不正确。' if code==403 else '尝试次数过多，请在 15 分钟后重试。'})
