@@ -53,6 +53,8 @@ def handle(handler, authorized):
             respond(200,{'log':maintenance.SharedStore().log(job)})
         elif handler.command=='POST' and path=='/admin/maintenance/check':respond(200,maintenance.check_updates(force=True))
         elif handler.command=='POST' and path=='/admin/maintenance/auto-sync':respond(200,maintenance.set_auto_sync(body.get('enabled')))
+        elif handler.command=='POST' and path=='/admin/maintenance/log-settings':
+            respond(202,maintenance.enqueue('logs',maintenance.validate_log_settings(body)))
         elif handler.command=='POST' and path=='/admin/maintenance/job':respond(202,maintenance.enqueue(body.get('kind')))
         else:respond(404,{'error':'接口不存在'})
     except (ValueError,TypeError,KeyError,OverflowError):respond(400,{'error':'请求参数无效或当前操作不可用'})

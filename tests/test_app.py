@@ -11,6 +11,7 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import app  # noqa: E402
+import web_auth
 
 
 def basic(user, password):
@@ -18,22 +19,26 @@ def basic(user, password):
 
 
 class AuthTests(unittest.TestCase):
+    def setUp(self):
+        self.temp=tempfile.TemporaryDirectory();self.addCleanup(self.temp.cleanup)
+        db=patch.object(web_auth,'DB_PATH',Path(self.temp.name)/'auth.db');db.start();self.addCleanup(db.stop)
+
     def test_correct_credentials_accepted(self):
         with patch.dict(os.environ, {"ADMIN_USERNAME": "admin", "ADMIN_PASSWORD": "s3cret-pass"}):
-            self.assertTrue(app.admin_authorized(basic("admin", "s3cret-pass")))
-            self.assertFalse(app.admin_authorized(basic("admin", "wrong")))
+            self.assertTrue(web_auth.credentials_valid("admin", "s3cret-pass"))
+            self.assertFalse(web_auth.credentials_valid("admin", "wrong"))
 
     def test_non_ascii_credentials_do_not_raise(self):
         with patch.dict(os.environ, {"ADMIN_USERNAME": "admin", "ADMIN_PASSWORD": "s3cret-pass"}):
-            self.assertFalse(app.admin_authorized(basic("用户", "密码")))
+            self.assertFalse(web_auth.credentials_valid("用户", "密码"))
         with patch.dict(os.environ, {"ADMIN_USERNAME": "管理员", "ADMIN_PASSWORD": "密码🔑"}):
-            self.assertTrue(app.admin_authorized(basic("管理员", "密码🔑")))
+            self.assertTrue(web_auth.credentials_valid("管理员", "密码🔑"))
 
     def test_placeholder_or_empty_password_is_not_a_login(self):
         for value in ("", "change-me"):
             with patch.dict(os.environ, {"ADMIN_USERNAME": "admin", "ADMIN_PASSWORD": value}):
                 self.assertFalse(app.admin_password_configured())
-                self.assertFalse(app.admin_authorized(basic("admin", value)))
+                self.assertFalse(web_auth.credentials_valid("admin", value))
 
 
 class ProxyConfigTests(unittest.TestCase):

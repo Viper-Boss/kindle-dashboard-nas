@@ -35,6 +35,9 @@ if [ -n "$MTPROTO_IMAGE" ]; then
 fi
 
 echo "[2/4] 复制项目和私有配置……"
+if [ -f "$PROJECT_DIR/data/auth.sqlite3" ]; then
+  docker exec kindle-dashboard python -c 'import web_auth;web_auth.export_account("/data/migration-auth-backup.sqlite3")'
+fi
 if [ -f "$PROJECT_DIR/data/traffic.sqlite3" ]; then
   docker exec kindle-dashboard python -c 'import traffic_stats; traffic_stats.collect_once(); traffic_stats.TrafficStore().backup("/data/migration-traffic-backup.sqlite3")'
 fi
@@ -42,6 +45,7 @@ tar \
   --exclude='./migration' \
   --exclude='./data/traffic.sqlite3*' \
   --exclude='./data/auth.sqlite3*' \
+  --exclude='./data/*-auth-backup.sqlite3*' \
   --exclude='./data/maintenance' \
   --exclude='./data/*-traffic-backup.sqlite3*' \
   --exclude='./security-staging' \
@@ -56,6 +60,11 @@ tar \
 if [ -f "$PROJECT_DIR/data/migration-traffic-backup.sqlite3" ]; then
   cp "$PROJECT_DIR/data/migration-traffic-backup.sqlite3" "$BUNDLE_DIR/project/data/traffic.sqlite3"
   rm -f "$PROJECT_DIR/data/migration-traffic-backup.sqlite3"
+fi
+
+if [ -f "$PROJECT_DIR/data/migration-auth-backup.sqlite3" ]; then
+  cp "$PROJECT_DIR/data/migration-auth-backup.sqlite3" "$BUNDLE_DIR/project/data/auth.sqlite3"
+  rm -f "$PROJECT_DIR/data/migration-auth-backup.sqlite3"
 fi
 
 echo "[3/4] 导出 Docker 镜像（可能需要几分钟）……"

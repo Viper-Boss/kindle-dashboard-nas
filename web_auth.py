@@ -13,9 +13,29 @@ import urllib.parse
 
 DB_PATH = Path(os.getenv('AUTH_DB', '/data/auth.sqlite3'))
 COOKIE = 'kindle_session'
+PASSWORD_ROUNDS = 600_000
 
 
-def credentials_valid(username, password):
+def account_record(db=None):
+    if db is None:
+        with database() as connection:
+            return account_record(connection)
+    row = db.execute('SELECT username,salt,digest,rounds,revision FROM account WHERE id=1').fetchone()
+    return dict(zip(('username','salt','digest','rounds','revision'),row)) if row else None
+
+
+def credentials_configured():
+    return bool(account_record()) or os.getenv('ADMIN_PASSWORD','') not in ('','change-me')
+
+
+def credentials_valid(username, password, db=None):
+    if not isinstance(username,str) or not isinstance(password,str):
+        return False
+    saved = account_record(db)
+    if saved:
+        digest = hashlib.pbkdf2_hmac('sha256',password.encode(),bytes.fromhex(saved['salt']),saved['rounds']).hex()
+        return (hmac.compare_digest(username.encode(),saved['username'].encode())
+                & hmac.compare_digest(digest,saved['digest']))
     expected = os.getenv('ADMIN_PASSWORD', '')
     if expected in ('', 'change-me') or not isinstance(username, str) or not isinstance(password, str):
         return False
@@ -23,7 +43,10 @@ def credentials_valid(username, password):
             & hmac.compare_digest(password.encode(), expected.encode()))
 
 
-def fingerprint():
+def fingerprint(db=None):
+    saved = account_record(db)
+    if saved:
+        return saved['revision']
     return hashlib.sha256((os.getenv('ADMIN_USERNAME', 'admin')+'\0'+os.getenv('ADMIN_PASSWORD', '')).encode()).hexdigest()
 
 
@@ -34,6 +57,7 @@ def database():
     try:
         db.execute('CREATE TABLE IF NOT EXISTS sessions(token TEXT PRIMARY KEY, username TEXT, fingerprint TEXT, expires INTEGER)')
         db.execute('CREATE TABLE IF NOT EXISTS attempts(peer TEXT PRIMARY KEY, started INTEGER, failures INTEGER)')
+        db.execute('CREATE TABLE IF NOT EXISTS account(id INTEGER PRIMARY KEY CHECK(id=1),username TEXT,salt TEXT,digest TEXT,rounds INTEGER,revision TEXT)')
         os.chmod(DB_PATH, 0o600)
         with db:
             yield db
@@ -68,16 +92,54 @@ def login(username, password, peer, remember=False):
         attempt = db.execute('SELECT failures FROM attempts WHERE peer=?', (peer,)).fetchone()
         if attempt and attempt[0] >= 10:
             return None, 429
-        if not credentials_valid(username, password):
+        if not credentials_valid(username, password, db):
             db.execute('INSERT INTO attempts VALUES (?,?,1) ON CONFLICT(peer) DO UPDATE SET failures=failures+1', (peer,now))
             return None, 401
         db.execute('DELETE FROM attempts WHERE peer=?', (peer,))
         db.execute('DELETE FROM sessions WHERE expires<=?', (now,))
         token = secrets.token_urlsafe(32); age = 7*86400 if remember else 12*3600
-        db.execute('INSERT INTO sessions VALUES (?,?,?,?)', (hashlib.sha256(token.encode()).hexdigest(),username,fingerprint(),now+age))
+        db.execute('INSERT INTO sessions VALUES (?,?,?,?)', (hashlib.sha256(token.encode()).hexdigest(),username,fingerprint(db),now+age))
         # Retain a bounded number of devices for this single administrator.
         db.execute('DELETE FROM sessions WHERE token NOT IN (SELECT token FROM sessions ORDER BY expires DESC,rowid DESC LIMIT 32)')
     return (token, age), 200
+
+
+def change_account(username, current_password, new_password, confirmation, peer):
+    if (not isinstance(username,str) or not 1<=len(username)<=64
+            or any(c.isspace() or ord(c)<32 or ord(c)==127 or c==':' for c in username)):
+        raise ValueError('用户名为 1–64 个字符，不能包含空格或冒号。')
+    if not all(isinstance(x,str) for x in (current_password,new_password,confirmation)):
+        raise ValueError('请输入有效的密码。')
+    if new_password != confirmation:
+        raise ValueError('两次输入的新密码不一致。')
+    if new_password and not 12<=len(new_password)<=128:
+        raise ValueError('新密码需要 12–128 个字符。')
+    now=int(time.time())
+    with database() as db:
+        db.execute('DELETE FROM attempts WHERE started<?',(now-900,))
+        failed=db.execute('SELECT failures FROM attempts WHERE peer=?',(peer,)).fetchone()
+        if failed and failed[0]>=10:return 429
+        if not credentials_valid((account_record(db) or {}).get('username',os.getenv('ADMIN_USERNAME','admin')),current_password,db):
+            db.execute('INSERT INTO attempts VALUES (?,?,1) ON CONFLICT(peer) DO UPDATE SET failures=failures+1',(peer,now))
+            return 403
+        salt=secrets.token_bytes(16)
+        digest=hashlib.pbkdf2_hmac('sha256',(new_password or current_password).encode(),salt,PASSWORD_ROUNDS).hex()
+        db.execute('INSERT OR REPLACE INTO account VALUES (1,?,?,?,?,?)',(username,salt.hex(),digest,PASSWORD_ROUNDS,secrets.token_hex(32)))
+        db.execute('DELETE FROM sessions');db.execute('DELETE FROM attempts')
+    return 200
+
+
+def export_account(destination):
+    # Keep the account hash in private migrations, while requiring a fresh login.
+    with database() as source, sqlite3.connect(destination) as target:
+        source.backup(target)
+        target.execute('DELETE FROM sessions');target.execute('DELETE FROM attempts')
+        target.commit();target.execute('VACUUM')
+
+
+def reset_to_environment():
+    with database() as db:
+        db.execute('DELETE FROM account');db.execute('DELETE FROM sessions');db.execute('DELETE FROM attempts')
 
 
 def logout(headers):
@@ -103,7 +165,7 @@ def redirect(handler, target):
 
 def handle(handler):
     path = urllib.parse.urlparse(handler.path).path
-    if path not in ('/login','/auth/login','/auth/logout','/auth/session'):
+    if path not in ('/login','/auth/login','/auth/logout','/auth/session','/auth/account'):
         return False
     def respond(code, value, cookie=None):
         raw = json.dumps(value, ensure_ascii=False).encode()
@@ -122,7 +184,7 @@ def handle(handler):
             handler.end_headers(); handler.wfile.write(raw); return True
         if handler.command == 'GET' and path == '/auth/session':
             user = session_user(handler.headers); respond(200 if user else 401,user or {'error':'请先登录'}); return True
-        if handler.command != 'POST' or path not in ('/auth/login','/auth/logout'):
+        if handler.command != 'POST' or path not in ('/auth/login','/auth/logout','/auth/account'):
             respond(404,{'error':'接口不存在'}); return True
         origin = handler.headers.get('Origin','')
         if (handler.headers.get('X-Requested-With') != 'KindleAdmin'
@@ -134,13 +196,22 @@ def handle(handler):
         if not 0 < length <= 4096: raise ValueError('请求过大')
         data = json.loads(handler.rfile.read(length))
         if not isinstance(data,dict) or type(data.get('remember',False)) is not bool: raise ValueError('请求格式无效')
+        if path == '/auth/account':
+            if not session_user(handler.headers):
+                respond(401,{'error':'请先登录'});return True
+            code=change_account(data.get('username'),data.get('currentPassword'),data.get('newPassword',''),data.get('confirmation',''),handler.client_address[0])
+            if code!=200:
+                respond(code,{'error':'当前密码不正确。' if code==403 else '尝试次数过多，请在 15 分钟后重试。'})
+            else:
+                respond(200,{'ok':True,'reauthenticate':True},cookie_header())
+            return True
         session, code = login(data.get('username'),data.get('password'),handler.client_address[0],data.get('remember',False))
         if not session:
             respond(code,{'error':'尝试次数过多，请在 15 分钟后重试。' if code == 429 else '用户名或密码不正确，请重新输入。'})
         else:
             respond(200,{'ok':True,'next':safe_next(data.get('next'))},cookie_header(*session))
-    except (ValueError,TypeError,KeyError):
-        respond(400,{'error':'请输入有效的用户名和密码。'})
+    except (ValueError,TypeError,KeyError) as error:
+        respond(400,{'error':str(error) if path=='/auth/account' else '请输入有效的用户名和密码。'})
     except Exception:
         respond(503,{'error':'登录服务暂不可用，请稍后重试。'})
     return True

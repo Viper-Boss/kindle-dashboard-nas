@@ -52,6 +52,36 @@ class WebLoginTests(unittest.TestCase):
         with patch.object(web_auth.time,'time',return_value=time.time()+901):
             self.assertEqual(web_auth.login('管理员','test-password-秘密','192.168.1.5')[1],200)
 
+    def test_account_change_rejects_wrong_current_password_and_revokes_old_sessions(self):
+        session,_=web_auth.login('管理员','test-password-秘密','192.168.1.5')
+        headers={'Cookie':web_auth.COOKIE+'='+session[0]}
+        self.assertEqual(web_auth.change_account('新管理员','wrong','new-password-12345','new-password-12345','192.168.1.5'),403)
+        self.assertIsNotNone(web_auth.session_user(headers))
+        self.assertEqual(web_auth.change_account('新管理员','test-password-秘密','new-password-12345','new-password-12345','192.168.1.5'),200)
+        self.assertIsNone(web_auth.session_user(headers))
+        self.assertFalse(web_auth.credentials_valid('管理员','test-password-秘密'))
+        self.assertTrue(web_auth.credentials_valid('新管理员','new-password-12345'))
+        with sqlite3.connect(self.path) as db:
+            saved=db.execute('SELECT digest,salt FROM account').fetchone()
+        self.assertNotIn('new-password',repr(saved))
+
+    def test_username_only_change_preserves_password_and_private_export_discards_sessions(self):
+        self.assertEqual(web_auth.change_account('new-admin','test-password-秘密','','','local'),200)
+        self.assertTrue(web_auth.credentials_valid('new-admin','test-password-秘密'))
+        web_auth.login('new-admin','test-password-秘密','local')
+        destination=Path(self.temp.name)/'migration.sqlite3';web_auth.export_account(destination)
+        with sqlite3.connect(destination) as db:
+            self.assertEqual(db.execute('SELECT COUNT(*) FROM sessions').fetchone()[0],0)
+            self.assertEqual(db.execute('SELECT username FROM account').fetchone()[0],'new-admin')
+        web_auth.reset_to_environment()
+        self.assertTrue(web_auth.credentials_valid('管理员','test-password-秘密'))
+        self.assertFalse(web_auth.credentials_valid('new-admin','test-password-秘密'))
+
+    def test_account_validation_does_not_change_credentials(self):
+        for username,password,confirmation in [('bad name','long-password-123','long-password-123'),('admin','short','short'),('admin','long-password-123','different')]:
+            with self.assertRaises(ValueError):web_auth.change_account(username,'test-password-秘密',password,confirmation,'local')
+        self.assertTrue(web_auth.credentials_valid('管理员','test-password-秘密'))
+
     def test_redirect_targets_cannot_leave_admin(self):
         for target in ['https://evil.example','//evil.example','/admin/../other','/admin?next=//evil']:
             self.assertEqual(web_auth.safe_next(target),'/admin')
@@ -92,6 +122,15 @@ class WebLoginTests(unittest.TestCase):
         status,_,body=request('GET','/admin',headers={'Cookie':cookie})
         self.assertEqual(status,200);self.assertIn('退出登录'.encode(),body)
         h['Cookie']=cookie
+        account={'username':'new-admin','currentPassword':'wrong','newPassword':'new-password-123','confirmation':'new-password-123'}
+        self.assertEqual(request('POST','/auth/account',account,h)[0],403)
+        account['currentPassword']='test-password-秘密'
+        self.assertEqual(request('POST','/auth/account',account,h)[0],200)
+        self.assertEqual(request('GET','/auth/session',headers={'Cookie':cookie})[0],401)
+        # The old bootstrap Basic credentials must not remain an API back door.
+        import base64
+        old={'Authorization':'Basic '+base64.b64encode('管理员:test-password-秘密'.encode()).decode()}
+        self.assertEqual(request('GET','/admin/traffic/status',headers=old)[0],401)
         self.assertEqual(request('POST','/auth/logout',{},h)[0],200)
         self.assertEqual(request('GET','/auth/session',headers={'Cookie':cookie})[0],401)
 

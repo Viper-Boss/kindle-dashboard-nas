@@ -147,6 +147,7 @@ class Worker:
 
     def compose(self, *args, extra=None):
         command=['docker','compose','--project-directory',str(self.project),'-f',str(self.project/'docker-compose.yml')]
+        if (self.state/'logging-override.json').exists():command+=['-f',str(self.state/'logging-override.json')]
         if extra:command+=['-f',str(extra)]
         self.run(command+list(args))
 
@@ -358,16 +359,52 @@ class Worker:
             self.log('应用新版本失败，执行自动回退。\n');self.rollback();raise
         with self.lock:self.info['rollbackAvailable']=True
 
+    def valid_request(self, job):
+        if not isinstance(job,dict):return False
+        allowed={'id','kind','state','requestedAt'}|({'logSettings'} if job.get('kind')=='logs' else set())
+        valid=(not set(job)-allowed and bool(self.m.JOB_ID.fullmatch(str(job.get('id',''))))
+               and job.get('kind') in ('upgrade','rollback','logs') and job.get('state')=='queued'
+               and isinstance(job.get('requestedAt'),str) and len(job['requestedAt'])<=60)
+        if valid and job['kind']=='logs':
+            try:self.m.validate_log_settings(job.get('logSettings'))
+            except ValueError:return False
+        return valid
+
+    def apply_logs(self):
+        policy=self.m.validate_log_settings(self.job['logSettings'])
+        before=self.private('logging-override.json')
+        old=self.m.log_settings(self.project/'data')
+        per_file=policy['maxMB']*1024*1024//8
+        logging={'driver':'json-file','options':{'max-size':str(per_file),'max-file':'2'}} if policy['enabled'] else {'driver':'none'}
+        override={'services':{name:{'logging':logging} for name in CONTAINERS}}
+        self.save_private('logging-pending.json',{'pending':True,'policy':policy})
+        selected=self.selectors();completed=False
+        try:
+            self.stage('应用日志容量与记录开关')
+            self.run(['docker','exec','kindle-dashboard','python','-c','import traffic_stats;traffic_stats.collect_once()'])
+            self.save_private('logging-override.json',override)
+            self.compose('config','--quiet');self.compose('up','-d','--no-build','--force-recreate')
+            self.health();self.selectors(selected)
+            self.shared.write('log-settings.json',policy)
+            self.shared.prune_logs(policy['maxMB']*1024*1024//4)
+            completed=True
+        except Exception:
+            if before is None:(self.state/'logging-override.json').unlink(missing_ok=True)
+            else:self.save_private('logging-override.json',before)
+            self.shared.write('log-settings.json',old)
+            self.compose('up','-d','--no-build','--force-recreate');self.health();self.selectors(selected)
+            completed=True
+            raise
+        finally:
+            if completed:self.save_private('logging-pending.json',{'pending':False})
+
     def process(self, job):
-        if (not isinstance(job,dict) or set(job)-{'id','kind','state','requestedAt'}
-                or not self.m.JOB_ID.fullmatch(str(job.get('id','')))
-                or job.get('kind') not in ('upgrade','rollback') or job.get('state')!='queued'
-                or not isinstance(job.get('requestedAt'),str) or len(job['requestedAt'])>60):
-            raise ValueError('维护请求格式无效')
+        if not self.valid_request(job):raise ValueError('维护请求格式无效')
         self.job=job
         with self.lock:self.info.update(busy=True,job=job['id'],lastError=None)
         try:
             if job['kind']=='upgrade':self.upgrade()
+            elif job['kind']=='logs':self.apply_logs()
             else:self.rollback()
             job.update(state='success',stage='已完成',finishedAt=self.m.utc_now())
         except Exception as error:
@@ -391,6 +428,10 @@ class Worker:
             if self.private('apply.json',{}).get('pending'):
                 raise RuntimeError('中断后的自动回退未完成，请检查 NAS 维护日志')
 
+        pending=self.private('logging-pending.json',{})
+        if pending.get('pending'):
+            self.process({'id':secrets_token(),'kind':'logs','state':'queued','requestedAt':self.m.utc_now(),'logSettings':pending['policy']})
+
     def loop(self, once=False):
         self.recover_interrupted()
         threading.Thread(target=self.heartbeat,daemon=True).start()
@@ -401,7 +442,7 @@ class Worker:
                 for name in self.shared.names('jobs'):
                     job=self.shared.read(name,{},'jobs')
                     if isinstance(job,dict) and job.get('state')=='queued':
-                        if job.get('id')!=name[:-5] or set(job)-{'id','kind','state','requestedAt'} or job.get('kind') not in ('upgrade','rollback') or not isinstance(job.get('requestedAt'),str) or len(job['requestedAt'])>60:
+                        if job.get('id')!=name[:-5] or not self.valid_request(job):
                             self.shared.write(name,{'id':name[:-5],'state':'failed','stage':'维护请求格式无效','finishedAt':self.m.utc_now()},'jobs')
                         else:pending.append(job)
                 if pending:

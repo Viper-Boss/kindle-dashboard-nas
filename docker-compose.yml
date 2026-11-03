@@ -5,6 +5,11 @@ services:
     build: .
     container_name: kindle-dashboard
     restart: always
+    logging:
+      driver: json-file
+      options:
+        max-size: "12m"
+        max-file: "2"
     depends_on:
       mihomo:
         condition: service_healthy
@@ -34,6 +39,11 @@ services:
     build: ./mihomo
     container_name: kindle-dashboard-proxy
     restart: always
+    logging:
+      driver: json-file
+      options:
+        max-size: "12m"
+        max-file: "2"
     command:
     - -f
     - /root/.config/mihomo/config.yaml
@@ -56,6 +66,11 @@ services:
     image: nas-mtproto-security:local
     container_name: nas-mtproto
     restart: always
+    logging:
+      driver: json-file
+      options:
+        max-size: "12m"
+        max-file: "2"
     working_dir: /app
     depends_on:
       mihomo:

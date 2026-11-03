@@ -1173,29 +1173,11 @@ rules:
 
 
 def admin_password_configured() -> bool:
-    """未设置，或仍是 .env.example 里的占位值 change-me，都视为未配置。"""
-    return os.getenv("ADMIN_PASSWORD", "") not in ("", "change-me")
+    return web_auth.credentials_configured()
 
 
 def admin_authorized(headers: Any) -> bool:
-    if web_auth.session_user(headers):
-        return True
-    expected_user = os.getenv("ADMIN_USERNAME", "admin")
-    expected_password = os.getenv("ADMIN_PASSWORD", "")
-    if not admin_password_configured():
-        return False
-    auth = headers.get("Authorization", "")
-    if not auth.startswith("Basic "):
-        return False
-    try:
-        decoded = base64.b64decode(auth[6:]).decode("utf-8")
-        username, password = decoded.split(":", 1)
-    except Exception:
-        return False
-    # compare_digest 对含非 ASCII 的 str 会抛 TypeError，所以统一按字节比较。
-    return hmac.compare_digest(username.encode("utf-8"), expected_user.encode("utf-8")) and hmac.compare_digest(
-        password.encode("utf-8"), expected_password.encode("utf-8")
-    )
+    return bool(web_auth.session_user(headers))
 
 
 def html_input(name: str, label: str, value: str = "", input_type: str = "text", placeholder: str = "") -> str:

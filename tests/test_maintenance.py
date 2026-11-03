@@ -61,6 +61,29 @@ class MaintenanceTests(unittest.TestCase):
             with self.assertRaises(urllib.error.HTTPError):maintenance.open_url('https://api.github.com/anything')
             proxy.assert_not_called()
 
+    def test_log_budget_rotates_and_switch_disables_recording(self):
+        with patch.object(maintenance,'MEBIBYTE',1024):
+            self.store.write('log-settings.json',{'enabled':True,'maxMB':20})
+            self.store.append_log('a'*32,'a'*4000)
+            self.store.append_log('b'*32,'b'*4000)
+            files=list((self.root/'maintenance/logs').glob('*.log'))
+            self.assertLessEqual(sum(p.stat().st_size for p in files),5*1024)
+            self.store.append_log('b'*32,'x'*9000)
+            self.assertLessEqual(sum(p.stat().st_size for p in (self.root/'maintenance/logs').glob('*.log')),5*1024)
+            before=self.store.log('b'*32)
+            self.store.write('log-settings.json',{'enabled':False,'maxMB':20})
+            self.store.append_log('b'*32,'must not be recorded')
+            self.assertEqual(self.store.log('b'*32),before)
+        for value in [{'enabled':'false','maxMB':100},{'enabled':True,'maxMB':19},{'enabled':True,'maxMB':501},{'enabled':True,'maxMB':True}]:
+            with self.assertRaises(ValueError):maintenance.validate_log_settings(value)
+
+    def test_component_inventory_keeps_proxy_versions_visible_when_offline(self):
+        import proxy_admin
+        with patch.object(proxy_admin,'api',side_effect=OSError('offline')),patch.object(maintenance.urllib.request,'build_opener',side_effect=OSError('offline')):
+            versions=maintenance.components()
+        self.assertIn('Mihomo',versions);self.assertIn('Telegram / WhatsApp 转发',versions)
+        self.assertIsNone(versions['Mihomo']);self.assertIsNone(versions['Telegram / WhatsApp 转发'])
+
     def test_auto_sync_switch_is_a_boolean(self):
         with patch.object(maintenance,'DATA_ROOT',self.root):
             with self.assertRaises(ValueError):maintenance.set_auto_sync('false')
@@ -138,6 +161,36 @@ class WorkerInputTests(unittest.TestCase):
                 worker.recover_interrupted();rollback.assert_called_once()
             self.assertEqual(worker.shared.read('a'*32+'.json',section='jobs')['state'],'failed')
             self.assertFalse(worker.private('apply.json')['pending'])
+
+    def test_logging_job_applies_bounded_docker_options_without_touching_history(self):
+        module=self.worker_module()
+        with tempfile.TemporaryDirectory() as folder,patch.dict(os.environ):
+            root=Path(folder);project=root/'project';project.mkdir();(project/'.env').write_text('ADMIN_PASSWORD=test-password\n')
+            (project/'data').mkdir();(project/'data/traffic.sqlite3').write_bytes(b'keep-history')
+            worker=module.Worker(project,root/'private',maintenance)
+            job={'id':'c'*32,'kind':'logs','state':'queued','requestedAt':'now','logSettings':{'enabled':True,'maxMB':80}}
+            with patch.object(worker,'run'),patch.object(worker,'compose'),patch.object(worker,'health'),patch.object(worker,'selectors',return_value={}):
+                worker.process(job)
+            self.assertEqual(job['state'],'success')
+            self.assertEqual(worker.shared.read('log-settings.json'),{'enabled':True,'maxMB':80})
+            override=worker.private('logging-override.json')
+            self.assertEqual(override['services']['mihomo']['logging']['options'],{'max-size':str(10*1024*1024),'max-file':'2'})
+            self.assertEqual((project/'data/traffic.sqlite3').read_bytes(),b'keep-history')
+            bad=dict(job,state='queued',logSettings={'enabled':False,'maxMB':1})
+            self.assertFalse(worker.valid_request(bad))
+
+    def test_failed_log_configuration_restores_previous_policy(self):
+        module=self.worker_module()
+        with tempfile.TemporaryDirectory() as folder,patch.dict(os.environ):
+            root=Path(folder);project=root/'project';project.mkdir();(project/'.env').write_text('ADMIN_PASSWORD=test-password\n')
+            worker=module.Worker(project,root/'private',maintenance)
+            job={'id':'d'*32,'kind':'logs','state':'queued','requestedAt':'now','logSettings':{'enabled':False,'maxMB':20}}
+            with patch.object(worker,'run'),patch.object(worker,'compose',side_effect=[RuntimeError('config rejected'),None]),patch.object(worker,'health'),patch.object(worker,'selectors',return_value={}):
+                worker.process(job)
+            self.assertEqual(job['state'],'failed')
+            self.assertEqual(worker.shared.read('log-settings.json'),{'enabled':True,'maxMB':100})
+            self.assertFalse((worker.state/'logging-override.json').exists())
+            self.assertFalse(worker.private('logging-pending.json')['pending'])
 
     def test_rollback_preserves_history_and_pauses_auto_sync(self):
         module=self.worker_module()

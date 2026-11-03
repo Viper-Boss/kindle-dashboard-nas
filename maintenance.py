@@ -19,6 +19,8 @@ JOB_ID = re.compile(r'^[0-9a-f]{32}$')
 _cache = None
 _cache_at = 0
 _cache_lock = threading.Lock()
+_log_lock = threading.Lock()
+MEBIBYTE = 1024*1024
 
 
 class SharedStore:
@@ -85,12 +87,35 @@ class SharedStore:
         with self.directory(section) as directory:
             return [n for n in os.listdir(directory) if re.fullmatch(r'[0-9a-f]{32}\.json',n)]
 
+    def prune_logs(self, limit, keep=None):
+        with self.directory('logs') as directory:
+            files=[]
+            for name in os.listdir(directory):
+                if not re.fullmatch(r'[0-9a-f]{32}\.log',name):continue
+                info=os.stat(name,dir_fd=directory,follow_symlinks=False)
+                if stat.S_ISREG(info.st_mode):files.append((info.st_mtime_ns,name,info.st_size))
+            total=sum(x[2] for x in files)
+            for _,name,size in sorted(files,key=lambda x:(x[1]==keep,x[0],x[1])):
+                if total<=limit:break
+                os.unlink(name,dir_fd=directory);total-=size
+
     def append_log(self, job, text):
         if not JOB_ID.fullmatch(job):raise ValueError('无效任务编号')
-        with self.directory('logs') as directory:
-            fd=os.open(job+'.log',os.O_WRONLY|os.O_CREAT|os.O_APPEND|os.O_NOFOLLOW|os.O_NONBLOCK,0o600,dir_fd=directory)
-            if not stat.S_ISREG(os.fstat(fd).st_mode):os.close(fd);raise ValueError('维护日志不是普通文件')
-            with os.fdopen(fd,'a',encoding='utf-8') as stream:stream.write(text)
+        policy=log_settings(self.root)
+        if not policy['enabled']:return
+        limit=policy['maxMB']*MEBIBYTE//4
+        raw=text.encode('utf-8')[-limit:]
+        with _log_lock:
+            with self.directory('logs') as directory:
+                fd=os.open(job+'.log',os.O_RDWR|os.O_CREAT|os.O_NOFOLLOW|os.O_NONBLOCK,0o600,dir_fd=directory)
+                if not stat.S_ISREG(os.fstat(fd).st_mode):os.close(fd);raise ValueError('维护日志不是普通文件')
+                with os.fdopen(fd,'r+b') as stream:
+                    stream.seek(0,2);size=stream.tell()
+                    if size+len(raw)>limit:
+                        stream.seek(max(0,size-(limit-len(raw))));tail=stream.read(limit-len(raw))
+                        stream.seek(0);stream.truncate();stream.write(tail)
+                    stream.write(raw)
+            self.prune_logs(limit,job+'.log')
 
     def log(self, job):
         if not JOB_ID.fullmatch(job):raise ValueError('无效任务编号')
@@ -175,8 +200,8 @@ def set_auto_sync(enabled):
     return settings()
 
 
-def enqueue(kind):
-    if kind not in ('upgrade','rollback'):raise ValueError('不支持的维护操作')
+def enqueue(kind, policy=None):
+    if kind not in ('upgrade','rollback','logs'):raise ValueError('不支持的维护操作')
     store=SharedStore();state=store.read('status.json',{})
     if state.get('busy'):raise ValueError('已有升级任务正在运行')
     if time.time()-float(state.get('heartbeat',0))>90:
@@ -186,8 +211,21 @@ def enqueue(kind):
         if item.get('state') in ('queued','running'):raise ValueError('已有维护任务在队列中')
     job=secrets.token_hex(16)
     payload={'id':job,'kind':kind,'state':'queued','requestedAt':utc_now()}
+    if kind=='logs':payload['logSettings']=validate_log_settings(policy)
     store.write(job+'.json',payload,'jobs')
     return payload
+
+
+def validate_log_settings(value):
+    if (not isinstance(value,dict) or set(value)!={'enabled','maxMB'}
+            or type(value['enabled']) is not bool or type(value['maxMB']) is not int
+            or not 20<=value['maxMB']<=500):
+        raise ValueError('日志容量必须为 20–500 MB，开关必须为布尔值')
+    return dict(value)
+
+
+def log_settings(root=None):
+    return validate_log_settings(SharedStore(root).read('log-settings.json',{'enabled':True,'maxMB':100}))
 
 
 def status():
@@ -199,18 +237,20 @@ def status():
         if isinstance(item,dict):jobs.append(item)
     jobs=sorted(jobs,key=lambda x:x.get('requestedAt',''),reverse=True)[:10]
     return {'worker':worker,'settings':settings(),'jobs':jobs,'current':deployment(),
-            'latest':store.read('latest.json'), 'components':components()}
+            'latest':store.read('latest.json'), 'components':components(),'logSettings':log_settings()}
 
 
 def components():
     import platform
-    versions={'Python':platform.python_version(),'Pillow':importlib.metadata.version('Pillow')}
+    versions={'Python':platform.python_version(),'Pillow':importlib.metadata.version('Pillow'),
+              'Mihomo':None,'Telegram / WhatsApp 转发':None,'转发 Python':None,'PyCryptodome':None,'PySocks':None}
     try:
         import proxy_admin
         versions['Mihomo']=proxy_admin.api('/version',timeout=3)['version']
+    except Exception:pass
+    try:
         opener=urllib.request.build_opener(urllib.request.ProxyHandler({}))
         with opener.open('http://mtproto:8766/status',timeout=3) as response:
             versions.update(json.load(response).get('componentVersions',{}))
-    except Exception:
-        versions.setdefault('Mihomo',None)
+    except Exception:pass
     return versions

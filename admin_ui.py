@@ -97,8 +97,9 @@ select{width:auto;padding-right:30px}textarea{height:auto;min-height:170px;paddi
 .desk-access code{font-size:15px}.copyrow{display:flex;align-items:center;justify-content:space-between;gap:10px}.copyrow button{height:28px;padding:0 10px;font-size:12px;border-radius:8px}
 .desk-services{display:grid;grid-template-columns:1fr 1fr;gap:20px}.desk-services>div{min-width:0}.desk-services h3{font-size:17px;margin:0 0 14px}.desk-services p{overflow-wrap:anywhere;margin:8px 0}
 a.linkbtn{display:inline-flex;align-items:center;height:36px;padding:0 16px;margin:0 8px 6px 0;border-radius:10px;background:var(--accent);color:#fff;text-decoration:none;font-weight:500}a.linkbtn:hover{background:var(--accent-ink)}
-#proxy-whatsapp details{margin-top:14px;padding-top:12px;border-top:1px solid var(--line-2)}#proxy-whatsapp summary,.desk-connections summary{cursor:pointer;color:var(--accent-ink);font-weight:500}#proxy-whatsapp .toolbar{margin-top:12px}
+#proxy-telegram details,#proxy-whatsapp details{margin-top:14px;padding-top:12px;border-top:1px solid var(--line-2)}#proxy-telegram summary,#proxy-whatsapp summary,.desk-connections summary{cursor:pointer;color:var(--accent-ink);font-weight:500}#proxy-telegram .toolbar,#proxy-whatsapp .toolbar{margin-top:12px}
 /* 活动连接 */
+#proxy-telegram summary:focus-visible,#proxy-whatsapp summary:focus-visible{outline:2px solid var(--accent);outline-offset:4px;border-radius:4px}
 .desk-connections{padding:8px 8px 4px}.desk-connections summary{display:none}.desk-connections table{width:100%;border-collapse:collapse;min-width:560px}
 .desk-connections th{position:sticky;top:0;text-align:left;font-weight:500;font-size:12px;color:var(--muted);padding:12px 14px;border-bottom:1px solid var(--line)}
 .desk-connections td{padding:12px 14px;border-bottom:1px solid var(--line-2);font-size:13px;overflow-wrap:anywhere}.desk-connections tr:last-child td{border:0}.desk-connections tbody tr:hover{background:#f8fafc}

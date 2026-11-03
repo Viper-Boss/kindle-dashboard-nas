@@ -26,7 +26,8 @@ IDLE_TIMEOUT = 300
 
 
 def component_versions():
-    values={'转发 Python':platform.python_version()}
+    from relay_version import VERSION
+    values={'转发 Python':platform.python_version(),'Telegram / WhatsApp 转发':VERSION}
     for label,package in [('PyCryptodome','pycryptodome'),('PySocks','PySocks')]:
         try:values[label]=importlib.metadata.version(package)
         except importlib.metadata.PackageNotFoundError:values[label]=None

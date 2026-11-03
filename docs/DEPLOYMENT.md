@@ -11,7 +11,7 @@ sudo python3 scripts/bootstrap.py
 docker compose up -d --build
 ```
 
-后台入口是 `http://NAS地址:8787/admin`，默认用户名 `admin`，密码在本机 `.env` 中。第一次启动的代理模板使用 DIRECT；进入后台添加 Clash/Mihomo 订阅后才会有可选节点。不要把真实 `.env`、订阅链接和密钥加入 Git。
+后台入口是 `http://NAS地址:8787/admin`，初始化用户名 `admin`，密码在本机 `.env` 中；登录后可在「系统设置 → 登录账号」修改，修改后不再使用初始化账号。第一次启动的代理模板使用 DIRECT；进入后台添加 Clash/Mihomo 订阅后才会有可选节点。不要把真实 `.env`、订阅链接和密钥加入 Git。
 
 ## 端口
 
