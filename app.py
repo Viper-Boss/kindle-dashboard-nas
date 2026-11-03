@@ -24,6 +24,7 @@ from admin_ui import enhance_admin_page
 from management import handle as management_handle
 import web_auth
 import traffic_stats
+import service_watchdog
 from proxy_admin import section as proxy_admin_section, handle as proxy_handle, save_and_reload, telegram_rule_lines
 
 
@@ -1440,6 +1441,7 @@ class Handler(BaseHTTPRequestHandler):
 def main() -> None:
     import signal
     traffic_stats.start()
+    service_watchdog.start()
     server = ThreadingHTTPServer(("0.0.0.0", PORT), Handler)
     def shutdown(*_):
         threading.Thread(target=server.shutdown, daemon=True).start()
@@ -1448,6 +1450,7 @@ def main() -> None:
     try:
         server.serve_forever()
     finally:
+        service_watchdog.stop()
         traffic_stats.stop()
         server.server_close()
 

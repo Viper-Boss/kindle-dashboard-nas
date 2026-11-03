@@ -154,7 +154,7 @@ def status():
     connections = api('/connections')
     groups = []
     for name, item in proxies.items():
-        if 'all' not in item: continue
+        if 'all' not in item or item.get('hidden') or name.startswith('__kindle_'): continue
         nodes = []
         for node in item['all']:
             obj = proxies.get(node, {})
@@ -176,11 +176,18 @@ def status():
         'connectionCount':len(connections.get('connections') or []),'memory':connections.get('memory',0),
         'connections':[{'id':c['id'],'host':c.get('metadata',{}).get('host') or c.get('metadata',{}).get('destinationIP'),
             'network':c.get('metadata',{}).get('network'),'chains':c.get('chains',[]),'upload':c.get('upload',0),'download':c.get('download',0)} for c in (connections.get('connections') or [])[:100]],
-        'telegram':tg, 'whatsapp':wa, 'access':access}
+        'telegram':tg, 'whatsapp':wa, 'access':access,
+        'serviceHealth':__import__('service_watchdog').snapshot(),
+        'autoSelection':__import__('service_watchdog').hourly_summary(proxies)}
 
 def action(data):
     kind = data.get('action')
-    if kind == 'wan-access':
+    if kind in ('service-health-toggle','service-health-check'):
+        import service_watchdog
+        if kind == 'service-health-toggle' and type(data.get('enabled')) is not bool:
+            raise ValueError('自动检测开关无效')
+        return service_watchdog.request(data.get('service'), data.get('enabled') if kind == 'service-health-toggle' else None)
+    elif kind == 'wan-access':
         service, enabled = data.get('service'), data.get('enabled')
         if service not in SERVICES or not isinstance(enabled, bool):
             raise ValueError('参数无效')
@@ -220,9 +227,15 @@ def action(data):
             tmp.write_text(json.dumps(info,ensure_ascii=False,indent=2));os.chmod(tmp,0o600);tmp.replace(p)
     elif kind == 'select':
         group, node = data.get('group',''), data.get('node','')
-        obj = api('/proxies/' + quoted(group))
-        if obj.get('type') != 'Selector' or node not in obj.get('all',[]): raise ValueError('请选择手动策略组中的有效节点')
-        api('/proxies/' + quoted(group), 'PUT', {'name':node})
+        with LOCK:
+            obj = api('/proxies/' + quoted(group))
+            if obj.get('type') != 'Selector' or obj.get('hidden') or group.startswith('__kindle_') or node not in obj.get('all',[]):
+                raise ValueError('请选择手动策略组中的有效节点')
+            api('/proxies/' + quoted(group), 'PUT', {'name':node})
+            import service_watchdog
+            if service_watchdog._engine:
+                for service,name in service_watchdog.GROUPS.items():
+                    if name == group: service_watchdog._engine.manual_change(service)
     elif kind == 'delay':
         node = data.get('node','')
         if node in api('/proxies')['proxies']:
@@ -290,7 +303,7 @@ def section():
 <div class="toolbar"><label>运行模式 <select id="proxy-mode"><option value="rule">规则模式（按规则分流）</option><option value="global">全局代理（全部走一个出口）</option><option value="direct">全部直连（不走代理）</option></select></label><button type="button" id="proxy-refresh">刷新状态</button><button type="button" id="proxy-reload">重载配置</button><label><input id="proxy-auto" type="checkbox" checked style="width:auto"> 自动刷新</label></div>
 <div id="proxy-stats" class="proxy-stats"></div><div id="proxy-message" role="status" aria-live="polite">正在读取代理状态…</div>
 <div class="toolbar"><input id="proxy-search" placeholder="搜索节点名称 / 协议" style="max-width:340px"><label><input id="proxy-sort" type="checkbox" style="width:auto"> 按延迟排序</label></div>
-<div id="proxy-groups"></div><div id="proxy-providers"></div><div id="proxy-telegram"></div><div id="proxy-whatsapp"></div>
+<div id="proxy-hourly" class="service-hourly"></div><div id="proxy-groups"></div><div id="proxy-providers"></div><div id="proxy-telegram"></div><div id="proxy-whatsapp"></div>
 <p class="hint"><a href="https://github.com/Viper-Boss/kindle-dashboard-nas" target="_blank" rel="noopener">项目源码（AGPL-3.0）</a></p><details><summary>活动连接</summary><div style="overflow:auto"><table><thead><tr><th>目标</th><th>协议 / 路径</th><th>上传 / 下载</th><th></th></tr></thead><tbody id="proxy-connections"></tbody></table></div></details></section>
 <script>(()=>{'use strict';
 const GROUP_INFO={'数据屏代理':['默认出口','没有匹配到其他规则的流量都从这里出去，数据屏的行情/用量请求也走它。'],'Telegram代理':['Telegram 出口','只处理 Telegram 服务器地址的流量（含本 NAS 的 Telegram 代理转发）；默认跟随“默认出口”，想单独指定线路时在这里选。'],'WhatsApp代理':['WhatsApp 出口','只处理 whatsapp.net 的流量；默认跟随“默认出口”，想单独指定线路时在这里选。'],'自动选择':['自动测速','内核定时测速，自动挑选最快的节点，不需要手动切换。'],'GLOBAL':['全局模式出口','仅在运行模式为“全局代理”时才使用；规则模式下这一组不起作用。']};
@@ -301,6 +314,32 @@ window.kindleGroupInfo=groupInfo;window.kindleTypeName=typeName;
 let state=null,last=null,busy=0;const $=id=>document.getElementById(id),esc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])),bytes=n=>{n=Number(n)||0;const u=['B','KB','MB','GB'];let i=0;while(n>=1024&&i<3){n/=1024;i++}return n.toFixed(i?1:0)+' '+u[i]};
 async function call(path,data){const r=await fetch('/admin/proxy/'+path,{credentials:'same-origin',cache:'no-store',...(data?{method:'POST',headers:{'Content-Type':'application/json','X-Requested-With':'KindleAdmin'},body:JSON.stringify(data)}:{})});const j=await r.json();if(!r.ok)throw Error(j.error||'请求失败');return j}
 function message(text,bad=false){$('proxy-message').textContent=text;$('proxy-message').style.color=bad?'#b93636':'#237847'}
+
+function renderServiceHealth(){
+ const h=state.serviceHealth||{},date=t=>t?new Date(t*1000).toLocaleString('zh-CN',{hour12:false}):'尚未检测';
+ const phase={waiting:'等待检测',disabled:'已关闭',paused:'已暂停',checking:'正在检测',healthy:'协议检测通过',retry:'等待复测',cooldown:'冷却中',unavailable:'未找到可用备用节点',error:'检测暂不可用'};
+ for(const [service,element] of [['telegram','proxy-telegram'],['whatsapp','proxy-whatsapp']]){
+  const container=$(element);if(!container)continue;const s=(h.services||{})[service]||{},on=!!(h.enabled||{})[service],box=document.createElement('div');
+  box.className='service-health';
+  const now=Date.now()/1000,cool=Math.max(0,Math.ceil(((s.lastSwitchAt||0)+(h.cooldownSeconds||600)-now)/60));
+  box.innerHTML='<div class="desk-panel-head"><b>自动服务保障</b><span class="chip '+(s.phase==='healthy'&&!h.engineError?'ok':'')+'">'+esc(h.engineError?'检测暂缓':phase[s.phase]||'等待启动')+'</span></div>'+
+   '<p class="hint">'+esc(h.engineError||s.reason||'检测成功时保持当前线路，失败时自动寻找备用节点。')+'</p>'+
+   '<p class="hint">最近检测节点：'+esc(s.node||'尚未检测')+'<br>最近检测：'+esc(date(s.lastCheckAt))+'<br>下次检测：'+esc(date(s.nextCheckAt))+'<br>连续失败 '+(s.failures||0)+' / '+(h.failureThreshold||3)+' 次'+(cool?' · 换线冷却剩余约 '+cool+' 分钟':'')+'</p>'+
+   (s.phase==='checking'?'<p class="hint" role="status">正在检测 '+esc(s.testingNode||'当前节点')+(s.candidateTotal?' · 备用节点 '+s.candidateIndex+' / '+s.candidateTotal:'')+'</p>':'')+
+   '<ul class="service-checks">'+((s.result||{}).checks||[]).map(c=>'<li class="'+(c.ok?'good':'bad')+'">'+(c.ok?'通过 · ':'未通过 · ')+esc(c.detail)+'</li>').join('')+'</ul>'+
+   '<div class="service-controls"><label><input type="checkbox" data-service-auto="'+service+'"'+(on?' checked':'')+'> 自动检测与故障切换</label><button type="button" data-service-check="'+service+'"'+(!on||s.phase==='checking'?' disabled':'')+'>立即检测</button></div>'+
+   '<p class="feature-note">每 '+(h.interval||60)+' 秒检测；连续 '+(h.failureThreshold||3)+' 次失败才寻找备用节点；备用节点复测两次，切换后冷却 '+((h.cooldownSeconds||600)/60)+' 分钟。检测不会登录账号或发送消息。</p>'+
+   '<details><summary>最近自动切换记录</summary>'+((h.events||[]).filter(e=>e.service===service).slice(0,6).map(e=>'<p class="hint">'+esc(date(e.time))+' · '+esc({switch:'故障切换',pin:'固定可用线路','no-candidate':'未找到备用节点','reconnect-warning':'清理旧连接未完成'}[e.kind]||e.kind)+'<br>'+esc(e.previous||'')+(e.node?' → '+esc(e.node):'')+'</p>').join('')||'<p class="hint">尚无自动切换记录。</p>')+'</details>';
+  container.append(box);
+ }
+ for(const b of document.querySelectorAll('[data-service-auto]'))b.onchange=()=>run({action:'service-health-toggle',service:b.dataset.serviceAuto,enabled:b.checked},b);
+ for(const b of document.querySelectorAll('[data-service-check]'))b.onclick=()=>run({action:'service-health-check',service:b.dataset.serviceCheck},b);
+ const a=state.autoSelection||{},el=$('proxy-hourly');
+ el.innerHTML='<div class="desk-panel-head"><h3>通用代理 · 定时测速规则</h3><span class="chip">'+(a.generalFollowsAuto?'通用出口跟随自动选择':'通用出口当前为固定线路')+'</span></div>'+
+  (a.error?'<p class="hint">'+esc(a.error)+'</p>':'<p class="hint">每 '+esc(a.interval?Number(a.interval)/60:'—')+' 分钟主动测速 · '+(a.lazy?'空闲时可能跳过':'空闲时也测速')+' · 单节点超时 '+esc(a.timeout)+' ms · 切换容差 '+esc(a.tolerance)+' ms</p><p class="hint">探测地址：'+esc(a.url)+' · 预期 HTTP '+esc(a.expectedStatus)+'<br>最近节点记录：'+esc(a.latestSampleAt?new Date(a.latestSampleAt).toLocaleString('zh-CN',{hour12:false}):'尚未采样')+' · 有结果 '+(a.tested||0)+' / '+(a.total||0)+' · 可用 '+(a.available||0)+'</p>')+
+  '<p class="feature-note">每小时是内核的测速周期，不是重启。内核不提供精确的下次执行时间或逐节点进度，这里展示真实规则与结果；服务保障的检测进度显示在“连接服务”页。页面每 5 秒读取状态，不会触发测速。</p>';
+}
+
 function render(){if(!state)return;const search=$('proxy-search').value.toLowerCase();$('proxy-groups').innerHTML='';for(const g of state.groups){const wrap=document.createElement('div');const info=groupInfo(g);wrap.dataset.group=g.name;wrap.innerHTML='<div class="group-bar"><div><h3 class="group-head">'+esc(info.title)+' <small>'+esc(g.name)+' · '+esc(typeName(g.type))+'</small></h3><p class="hint">'+esc(info.desc)+'</p><p class="hint">当前使用：<b>'+esc(g.now)+'</b>'+(g.type==='Selector'?' · 点击下方节点即可切换':' · 由内核按测速结果自动选择，无需手动切换')+'</p></div></div>';const test=document.createElement('button');test.type='button';test.textContent='测试本组延迟';test.disabled=busy>0;test.onclick=()=>run({action:'test-all',group:g.name},test);wrap.querySelector('.group-bar').append(test);const grid=document.createElement('div');grid.className='nodegrid';grid.style.marginTop='12px';let nodes=g.nodes.filter(n=>(n.name+' '+n.type).toLowerCase().includes(search));if($('proxy-sort').checked)nodes.sort((a,b)=>(a.delay>0?a.delay:Infinity)-(b.delay>0?b.delay:Infinity));for(const n of nodes){const card=document.createElement('div');card.className='node'+(n.selected?' current':'');const delay=n.delay==null?'未测试':n.delay>0?n.delay+' ms':'超时 / 不可用';const cls=n.delay>0?(n.delay<150?'good':n.delay<300?'mid':'slow'):n.delay===0?'bad':'',bar=n.delay>0?Math.max(8,Math.min(100,100-n.delay/5)):0;card.innerHTML='<div class="node-head"><b>'+esc(n.name)+'</b>'+(n.selected?'<span class="node-check" title="当前使用">✓</span>':'')+'</div><div class="node-meta"><span class="chip">'+esc(n.type)+'</span><span class="lat-text '+cls+'">'+esc(delay)+'</span></div><div class="lat"><i class="'+cls+'" style="width:'+bar+'%"></i></div>';const act=document.createElement('div');act.className='node-actions';if(g.type==='Selector'){const b=document.createElement('button');b.type='button';b.className='btn-use';b.textContent=n.selected?'使用中':'使用此节点';b.disabled=n.selected||busy>0;b.onclick=()=>run({action:'select',group:g.name,node:n.name},b);act.append(b)}const t=document.createElement('button');t.type='button';t.textContent='测延迟';t.disabled=busy>0;t.onclick=()=>run({action:'delay',node:n.name},t);act.append(t);card.append(act);grid.append(card)}wrap.append(grid);$('proxy-groups').append(wrap)}
 $('proxy-providers').innerHTML='';for(const p of state.providers){const row=document.createElement('div');row.className='toolbar';row.innerHTML='<span>订阅 '+esc(p.name)+' · '+p.count+' 节点 · 更新于 '+esc(p.updatedAt?new Date(p.updatedAt).toLocaleString():'未知')+'</span>';const b=document.createElement('button');b.type='button';b.textContent='更新订阅';b.disabled=busy>0;b.onclick=()=>run({action:'provider-update',provider:p.name},b);row.append(b);$('proxy-providers').append(row)}
 const acc=state.access||{},gnow=n=>{const g=state.groups.find(x=>x.name===n);return g?g.now:null};
@@ -315,8 +354,9 @@ $('proxy-whatsapp').innerHTML='<h3>WhatsApp 代理</h3><p><b>'+(wa.running?'运�
 $('wa-host').value=wa.publicHost||'';$('wa-host-save').onclick=()=>run({action:'whatsapp-settings',publicHost:$('wa-host').value},$('wa-host-save'));
 for(const el of document.querySelectorAll('[data-wan]'))el.onchange=()=>run({action:'wan-access',service:el.dataset.wan,enabled:el.checked},el);
 
+renderServiceHealth();
 $('proxy-connections').innerHTML='';for(const c of state.connections){const tr=document.createElement('tr');tr.innerHTML='<td>'+esc(c.host)+'</td><td>'+esc(c.network)+' / '+esc(c.chains.join(' → '))+'</td><td>'+bytes(c.upload)+' / '+bytes(c.download)+'</td>';const td=document.createElement('td'),b=document.createElement('button');b.type='button';b.textContent='断开';b.onclick=()=>run({action:'close',id:c.id},b);td.append(b);tr.append(td);$('proxy-connections').append(tr)}}
-async function refresh(silent=false,force=false){if(silent&&!force&&(busy||document.querySelector('#proxy-telegram details[open],#proxy-whatsapp details[open]')))return;try{state=await call('status');window.dispatchEvent(new CustomEvent('kindle:proxy-state',{detail:state}));$('proxy-mode').value=state.mode;const now=Date.now(),dt=last?(now-last.time)/1000:0,up=dt?Math.max(0,state.upload-last.up)/dt:0,down=dt?Math.max(0,state.download-last.down)/dt:0;last={time:now,up:state.upload,down:state.download};$('proxy-stats').innerHTML='<span>内核 '+esc(state.version)+'</span><span>连接 '+state.connectionCount+'</span><span>上传 '+bytes(state.upload)+' · '+bytes(up)+'/s</span><span>下载 '+bytes(state.download)+' · '+bytes(down)+'/s</span>';render();if(!silent)message('状态已更新 · '+new Date().toLocaleTimeString())}catch(e){message(e.message,true)}}
-async function run(data,button){busy++;if(button)button.disabled=true;message('正在执行，请稍候…');try{const result=await call('action',data);await refresh(true,true);message(result.delay!==undefined?'延迟 '+result.delay+' ms':result.tested!==undefined?'已测试 '+result.tested+' 个节点，可用 '+result.available+' 个':'操作成功')}catch(e){message(e.message,true)}finally{busy--;if(button)button.disabled=false;render()}}
+async function refresh(silent=false,force=false){if(silent&&!force&&(busy||document.querySelector('#proxy-telegram > details[open],#proxy-whatsapp > details[open]')))return;try{state=await call('status');window.dispatchEvent(new CustomEvent('kindle:proxy-state',{detail:state}));$('proxy-mode').value=state.mode;const now=Date.now(),dt=last?(now-last.time)/1000:0,up=dt?Math.max(0,state.upload-last.up)/dt:0,down=dt?Math.max(0,state.download-last.down)/dt:0;last={time:now,up:state.upload,down:state.download};$('proxy-stats').innerHTML='<span>内核 '+esc(state.version)+'</span><span>连接 '+state.connectionCount+'</span><span>上传 '+bytes(state.upload)+' · '+bytes(up)+'/s</span><span>下载 '+bytes(state.download)+' · '+bytes(down)+'/s</span>';render();if(!silent)message('状态已更新 · '+new Date().toLocaleTimeString())}catch(e){message(e.message,true)}}
+async function run(data,button){busy++;if(button)button.disabled=true;message('正在执行，请稍候…');try{const result=await call('action',data);await refresh(true,true);message(result.queued?'已安排检测，后台会自动运行':result.delay!==undefined?'延迟 '+result.delay+' ms':result.tested!==undefined?'已测试 '+result.tested+' 个节点，可用 '+result.available+' 个':'操作成功')}catch(e){message(e.message,true)}finally{busy--;if(button)button.disabled=false;render()}}
 $('proxy-mode').onchange=()=>run({action:'mode',mode:$('proxy-mode').value},$('proxy-mode'));$('proxy-refresh').onclick=()=>refresh();$('proxy-reload').onclick=()=>run({action:'reload'},$('proxy-reload'));$('proxy-search').oninput=render;$('proxy-sort').onchange=render;refresh();setInterval(()=>{if($('proxy-auto').checked&&!document.hidden)refresh(true)},5000);
 })();</script>'''
