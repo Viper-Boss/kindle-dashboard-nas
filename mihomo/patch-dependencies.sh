@@ -3,7 +3,7 @@ set -eu
 # Upstream v1.19.33 pins old Go modules for Go 1.20 compatibility. This build
 # targets Go 1.27 and retains the upstream gVisor feature while applying fixes.
 go get github.com/klauspost/compress@v1.18.7 \
-  golang.org/x/crypto@v0.58.0 \
+  golang.org/x/crypto@v0.58.1-0.20261009181718-2f1f834330b2 \
   golang.org/x/net@v0.62.0 \
   golang.org/x/sys@v0.49.0 \
   golang.org/x/text@v0.43.0 \

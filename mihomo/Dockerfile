@@ -16,7 +16,7 @@ COPY traffic/client_traffic_test.go tunnel/statistic/client_traffic_kindle_test.
 RUN go run /tmp/patch-traffic.go \
     && go test ./tunnel/statistic -run '^Test(ShortConnectionsAndMidnight|ConcurrentByteAccounting)$'
 RUN go build -tags with_gvisor -trimpath -buildvcs=false \
-       -ldflags '-s -w -X github.com/metacubex/mihomo/constant.Version=v1.19.33-security.2' -o /out/mihomo .
+       -ldflags '-s -w -X github.com/metacubex/mihomo/constant.Version=v1.19.33-security.3' -o /out/mihomo .
 COPY healthcheck.go /tmp/healthcheck.go
 RUN go build -trimpath -o /out/healthcheck /tmp/healthcheck.go
 
