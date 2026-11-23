@@ -23,6 +23,25 @@ STATE = {'enabled': True, 'startedAt': None, 'active': 0, 'accepted': 0,
          'downloadBytes': 0, 'lastError': '', 'lastConnectedAt': None}
 MAX_CONNECTIONS = 256
 IDLE_TIMEOUT = 300
+DRAIN_TIMEOUT = 30
+FIN_TIMEOUT = 1
+
+
+def keepalive(sock):
+    """Detect dead LAN/NAT sessions without modifying application bytes."""
+    if sock is None:
+        return
+    try:
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
+        for option, value in [('TCP_KEEPIDLE', 60), ('TCP_KEEPINTVL', 15), ('TCP_KEEPCNT', 4)]:
+            if hasattr(socket, option):
+                sock.setsockopt(socket.IPPROTO_TCP, getattr(socket, option), value)
+    except OSError:
+        pass  # TCP tuning is optional on platforms without these options.
+
+
+async def drain(writer):
+    await asyncio.wait_for(writer.drain(), DRAIN_TIMEOUT)
 
 
 def component_versions():
@@ -42,6 +61,7 @@ async def connect_socks(host, port, proxy_host='mihomo', proxy_port=7891):
     original_socket = getattr(socket, 'origsocket', socket.socket)
     sock = original_socket(socket.AF_INET, socket.SOCK_STREAM)
     sock.setblocking(False)
+    keepalive(sock)
     writer = None
     try:
         await asyncio.wait_for(loop.sock_connect(sock, addresses[0][4]), 10)
@@ -62,7 +82,7 @@ async def connect_socks(host, port, proxy_host='mihomo', proxy_port=7891):
         elif atyp == 4:
             length = 16
         elif atyp == 3:
-            length = (await reader.readexactly(1))[0]
+            length = (await asyncio.wait_for(reader.readexactly(1), 10))[0]
         else:
             raise ConnectionError('Invalid SOCKS5 address response')
         await asyncio.wait_for(reader.readexactly(length + 2), 10)
@@ -79,26 +99,39 @@ def proxy_header(peer):
     """Same PROXY v1 prefix that the official HAProxy chat backend sends."""
     try:
         ip = ipaddress.ip_address(peer[0])
+        if isinstance(ip, ipaddress.IPv6Address) and ip.ipv4_mapped:
+            ip = ip.ipv4_mapped
         family, dest = ('TCP6', '::') if ip.version == 6 else ('TCP4', '0.0.0.0')
         return ('PROXY %s %s %s %s 5222\r\n' % (family, ip, dest, peer[1])).encode('ascii')
     except (ValueError, TypeError, IndexError):
         return b'PROXY UNKNOWN\r\n'
 
 
-async def pump(reader, writer, direction):
+async def pump(reader, writer, direction, activity):
     while True:
-        data = await asyncio.wait_for(reader.read(65536), IDLE_TIMEOUT)
+        # A silent upload is normal during a download (and vice versa). Only
+        # expire when neither direction has delivered application bytes.
+        remaining = IDLE_TIMEOUT - (time.monotonic() - activity[0])
+        if remaining <= 0:
+            raise asyncio.TimeoutError('WhatsApp session idle')
+        try:
+            data = await asyncio.wait_for(reader.read(65536), remaining)
+        except asyncio.TimeoutError:
+            if time.monotonic() - activity[0] >= IDLE_TIMEOUT:
+                raise
+            continue
         if not data:
             if writer.can_write_eof():
                 try:
                     writer.write_eof()
-                    await writer.drain()
+                    await drain(writer)
                 except OSError as error:
                     if error.errno not in (errno.ENOTCONN, errno.EPIPE, errno.ECONNRESET):
                         raise
             return
         writer.write(data)
-        await writer.drain()
+        await drain(writer)
+        activity[0] = time.monotonic()
         STATE[direction] += len(data)
 
 
@@ -110,6 +143,7 @@ async def relay(reader, writer, role):
     if STATE['active'] >= MAX_CONNECTIONS:
         writer.close()
         return
+    keepalive(writer.get_extra_info('socket'))
     reader, writer = traffic_accounting.wrap('whatsapp', peer, reader, writer)
     STATE['active'] += 1
     STATE['accepted'] += 1
@@ -121,16 +155,23 @@ async def relay(reader, writer, role):
         incoming, upstream = await connect_socks(target, port)
         if role == 'chat':
             upstream.write(proxy_header(writer.get_extra_info('peername')))
-            await upstream.drain()
+            await drain(upstream)
         connected = True
         STATE['upstreamConnected'] += 1
         STATE['lastConnectedAt'] = time.time()
         STATE['lastError'] = ''
-        tasks = [asyncio.create_task(pump(reader, upstream, 'uploadBytes')),
-                 asyncio.create_task(pump(incoming, writer, 'downloadBytes'))]
-        done, pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_EXCEPTION)
+        activity = [time.monotonic()]
+        tasks = [asyncio.create_task(pump(reader, upstream, 'uploadBytes', activity)),
+                 asyncio.create_task(pump(incoming, writer, 'downloadBytes', activity))]
+        done, pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
         for task in done:
             task.result()
+        # Preserve a bounded half-close for request/response clients, but do
+        # not occupy one of the 256 slots for five minutes after remote EOF.
+        if pending:
+            done, pending = await asyncio.wait(pending, timeout=FIN_TIMEOUT)
+            for task in done:
+                task.result()
         for task in pending:
             task.cancel()
     except asyncio.CancelledError:

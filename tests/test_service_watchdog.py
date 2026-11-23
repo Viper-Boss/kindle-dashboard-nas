@@ -91,6 +91,35 @@ class WatchdogTests(unittest.TestCase):
         self.assertEqual(self.engine.state['services']['whatsapp']['failures'], 0)
         self.assertEqual(self.live_writes(), [])
 
+    def test_working_whatsapp_relay_takes_precedence_over_isolated_node_probe(self):
+        self.engine.relay_tester = lambda: {'ok': True, 'checks': []}
+        self.engine.check('whatsapp')
+        state = self.engine.state['services']['whatsapp']
+        self.assertEqual(state['phase'], 'healthy')
+        self.assertEqual(self.calls, [])
+        self.assertEqual(self.live_writes(), [])
+
+    def test_whatsapp_relay_only_failure_does_not_switch_healthy_node(self):
+        self.result['A'] = True
+        self.engine.relay_tester = lambda: {'ok': False, 'checks': [{'detail': 'media failed'}]}
+        for _ in range(3):
+            self.engine.check('whatsapp')
+        state = self.engine.state['services']['whatsapp']
+        self.assertEqual(state['phase'], 'relay-error')
+        self.assertEqual(state['relayResult']['checks'][0]['detail'], 'media failed')
+        self.assertEqual(self.live_writes(), [])
+
+    def test_whatsapp_switch_waits_for_new_live_path_verification(self):
+        self.engine.relay_tester = lambda: {'ok': False, 'checks': []}
+        for _ in range(3):
+            self.engine.check('whatsapp')
+        state = self.engine.state['services']['whatsapp']
+        self.assertEqual(self.live_writes(), [(sw.GROUPS['whatsapp'], 'B')])
+        self.assertEqual(state['phase'], 'waiting')
+        self.engine.relay_tester = lambda: {'ok': True, 'checks': []}
+        self.engine.check('whatsapp')
+        self.assertEqual(state['phase'], 'healthy')
+
     def test_switch_with_no_active_sessions_does_not_report_cleanup_failure(self):
         original = self.engine.api
         self.engine.api = lambda path, *a, **kw: {'connections': None} if path == '/connections' else original(path, *a, **kw)

@@ -132,13 +132,13 @@ def telegram_probe():
     return 'MTProto resPQ / nonce 已验证（DC2）'
 
 
-def whatsapp_chat_probe():
+def whatsapp_chat_probe(dial=None, prefix=True):
     # RFC 7748 public test vector. There is no account or private key in this probe.
     public = bytes.fromhex('e6db6867583030db3594c1a424b15f7c726624ec26b3353b10a903a6d0ab1c4c')
     hello = b'\x12\x22\x0a\x20' + public
-    with socks_connect('g.whatsapp.net', 5222) as s:
-        s.sendall(b'PROXY TCP4 192.168.120.200 0.0.0.0 54321 5222\r\n' +
-                  b'WA\x06\x03' + len(hello).to_bytes(3, 'big') + hello)
+    with (dial or socks_connect)('g.whatsapp.net', 5222) as s:
+        header = b'PROXY TCP4 192.168.120.200 0.0.0.0 54321 5222\r\n' if prefix else b''
+        s.sendall(header + b'WA\x06\x03' + len(hello).to_bytes(3, 'big') + hello)
         size = int.from_bytes(read_exact(s, 3), 'big')
         if not 32 < size < 8192:
             raise ConnectionError('WhatsApp 返回了无效 Noise 帧')
@@ -148,15 +148,38 @@ def whatsapp_chat_probe():
     return '聊天 Noise ServerHello 已验证'
 
 
-def whatsapp_media_probe():
-    with socks_connect('whatsapp.net', 443) as raw:
+def whatsapp_media_probe(dial=None):
+    with (dial or socks_connect)('whatsapp.net', 443) as raw:
         with ssl.create_default_context().wrap_socket(raw, server_hostname='mmg.whatsapp.net') as s:
-            return '媒体 %s / 证书已验证' % s.version()
+            s.settimeout(6)
+            s.sendall(b'HEAD / HTTP/1.1\r\nHost: mmg.whatsapp.net\r\nConnection: close\r\n\r\n')
+            with s.makefile('rb') as response:
+                line = response.readline(256)
+            parts = line.split()
+            # No account credentials or media URL are requested. A 404 at /
+            # is normal; TLS-only, block pages and upstream 5xx are not enough.
+            if (not line.endswith(b'\r\n') or len(parts) < 2 or
+                    parts[0] not in (b'HTTP/1.0', b'HTTP/1.1') or
+                    parts[1] not in (b'200', b'301', b'302', b'400', b'404', b'405')):
+                raise ConnectionError('媒体端点未返回预期 HTTP 响应')
+            return '媒体 %s / 证书与 HTTP %s 已验证' % (s.version(), parts[1].decode())
+
+
+def relay_probe():
+    """Exercise the actual chat/media listeners, with exactly one PROXY prefix."""
+    def dial(_host, port):
+        return socket.create_connection(('mtproto', 5222 if port == 5222 else 7777), 6)
+    return run_probes([lambda: whatsapp_chat_probe(dial, prefix=False),
+                       lambda: whatsapp_media_probe(dial)])
 
 
 def probe(service):
-    start = time.monotonic()
     funcs = [telegram_probe] if service == 'telegram' else [whatsapp_chat_probe, whatsapp_media_probe]
+    return run_probes(funcs)
+
+
+def run_probes(funcs):
+    start = time.monotonic()
     with ThreadPoolExecutor(max_workers=len(funcs)) as pool:
         futures = [pool.submit(f) for f in funcs]
         checks = []
@@ -182,9 +205,10 @@ def resolve(proxies, name):
 
 
 class Watchdog:
-    def __init__(self, store=None, api=None, tester=None, clock=None):
+    def __init__(self, store=None, api=None, tester=None, clock=None, relay_tester=None):
         self.store = store or maintenance.SharedStore()
         self.api, self.tester, self.clock = api or pa.api, tester or probe, clock or time.time
+        self.relay_tester = relay_tester
         self.lock = threading.RLock()
         self.stop_event, self.wake = threading.Event(), threading.Event()
         saved = self.store.read('service-health.json', {}) or {}
@@ -287,15 +311,25 @@ class Watchdog:
             if state.get('node') != current:
                 state.update(node=current, failures=0, candidateCursor=0)
             state.update(candidateIndex=0, candidateTotal=0)
-        result = self.check_node(service, current, generation)
+            if service == 'whatsapp' and self.relay_tester:
+                state.update(phase='checking', testingNode=current)
+        live = self.relay_tester() if service == 'whatsapp' and self.relay_tester else None
+        # A working live relay takes precedence over the isolated test path.
+        # If the live path fails, compare it to the same node in isolation.
+        result = live if live and live['ok'] else self.check_node(service, current, generation)
         with self.lock:
             if state['generation'] != generation:
                 return
             state.update(result=result, lastCheckAt=self.clock(), testingNode=None)
             state['failures'] = 0 if result['ok'] else state['failures'] + 1
+            if live:
+                state['relayResult'] = live
+                if not live['ok'] and result['ok']:
+                    state.update(phase='relay-error', reason='节点检测通过，但正式聊天或媒体转发失败。请检查转发端口与分流规则。')
+                    return
         if result['ok']:
             with self.lock:
-                state.update(phase='healthy', reason='当前节点服务检测通过')
+                state.update(phase='healthy', reason='正式聊天和媒体转发检测通过' if live else '当前节点服务检测通过')
                 state['lastGoodNodes'] = ([current] + [n for n in state['lastGoodNodes'] if n != current])[:8]
             if obj.get('now') != current:
                 self.commit(service, obj['now'], current, generation, pin=True)
@@ -344,6 +378,9 @@ class Watchdog:
                 state['lastSwitchAt'] = self.clock()
                 state['result'] = dict(state.get('candidateResult') or {})
                 state['lastCheckAt'] = state['result'].get('checkedAt', self.clock())
+                state.pop('relayResult', None)
+                if service == 'whatsapp' and self.relay_tester:
+                    state.update(phase='waiting', reason='备用节点已通过两次检测并切换，等待正式转发复查')
             self.event(service, 'pin' if pin else 'switch', previous=expected, node=node)
         if not pin:
             try:
@@ -410,7 +447,7 @@ def start():
     global _engine
     if _engine:
         return
-    _engine = Watchdog()
+    _engine = Watchdog(relay_tester=relay_probe)
     _engine.thread = threading.Thread(target=_engine.loop, name='service-watchdog', daemon=True)
     _engine.thread.start()
 

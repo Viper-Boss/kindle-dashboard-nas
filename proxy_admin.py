@@ -317,7 +317,7 @@ function message(text,bad=false){$('proxy-message').textContent=text;$('proxy-me
 
 function renderServiceHealth(){
  const h=state.serviceHealth||{},date=t=>t?new Date(t*1000).toLocaleString('zh-CN',{hour12:false}):'尚未检测';
- const phase={waiting:'等待检测',disabled:'已关闭',paused:'已暂停',checking:'正在检测',healthy:'协议检测通过',retry:'等待复测',cooldown:'冷却中',unavailable:'未找到可用备用节点',error:'检测暂不可用'};
+ const phase={waiting:'等待检测',disabled:'已关闭',paused:'已暂停',checking:'正在检测',healthy:'协议检测通过',retry:'等待复测',cooldown:'冷却中',unavailable:'未找到可用备用节点','relay-error':'正式转发异常',error:'检测暂不可用'};
  for(const [service,element] of [['telegram','proxy-telegram'],['whatsapp','proxy-whatsapp']]){
   const container=$(element);if(!container)continue;const s=(h.services||{})[service]||{},on=!!(h.enabled||{})[service],box=document.createElement('div');
   box.className='service-health';
@@ -326,7 +326,7 @@ function renderServiceHealth(){
    '<p class="hint">'+esc(h.engineError||s.reason||'检测成功时保持当前线路，失败时自动寻找备用节点。')+'</p>'+
    '<p class="hint">最近检测节点：'+esc(s.node||'尚未检测')+'<br>最近检测：'+esc(date(s.lastCheckAt))+'<br>下次检测：'+esc(date(s.nextCheckAt))+'<br>连续失败 '+(s.failures||0)+' / '+(h.failureThreshold||3)+' 次'+(cool?' · 换线冷却剩余约 '+cool+' 分钟':'')+'</p>'+
    (s.phase==='checking'?'<p class="hint" role="status">正在检测 '+esc(s.testingNode||'当前节点')+(s.candidateTotal?' · 备用节点 '+s.candidateIndex+' / '+s.candidateTotal:'')+'</p>':'')+
-   '<ul class="service-checks">'+((s.result||{}).checks||[]).map(c=>'<li class="'+(c.ok?'good':'bad')+'">'+(c.ok?'通过 · ':'未通过 · ')+esc(c.detail)+'</li>').join('')+'</ul>'+
+   '<ul class="service-checks">'+((s.relayResult||s.result||{}).checks||[]).map(c=>'<li class="'+(c.ok?'good':'bad')+'">'+(c.ok?'通过 · ':'未通过 · ')+esc(c.detail)+'</li>').join('')+'</ul>'+
    '<div class="service-controls"><label><input type="checkbox" data-service-auto="'+service+'"'+(on?' checked':'')+'> 自动检测与故障切换</label><button type="button" data-service-check="'+service+'"'+(!on||s.phase==='checking'?' disabled':'')+'>立即检测</button></div>'+
    '<p class="feature-note">每 '+(h.interval||60)+' 秒检测；连续 '+(h.failureThreshold||3)+' 次失败才寻找备用节点；备用节点复测两次，切换后冷却 '+((h.cooldownSeconds||600)/60)+' 分钟。检测不会登录账号或发送消息。</p>'+
    '<details><summary>最近自动切换记录</summary>'+((h.events||[]).filter(e=>e.service===service).slice(0,6).map(e=>'<p class="hint">'+esc(date(e.time))+' · '+esc({switch:'故障切换',pin:'固定可用线路','no-candidate':'未找到备用节点','reconnect-warning':'清理旧连接未完成'}[e.kind]||e.kind)+'<br>'+esc(e.previous||'')+(e.node?' → '+esc(e.node):'')+'</p>').join('')||'<p class="hint">尚无自动切换记录。</p>')+'</details>';

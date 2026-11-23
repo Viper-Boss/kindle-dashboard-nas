@@ -11,6 +11,65 @@ spec.loader.exec_module(wa)
 
 
 class RelayTests(unittest.IsolatedAsyncioTestCase):
+    async def test_one_way_download_remains_alive_while_other_direction_is_silent(self):
+        finished = asyncio.Event()
+        async def backend_handler(reader, writer):
+            try:
+                for _ in range(8):
+                    writer.write(b'x'); await writer.drain()
+                    await asyncio.sleep(0.03)
+            except (ConnectionError, OSError):
+                pass
+            finally:
+                writer.close()
+        backend = await asyncio.start_server(backend_handler, '127.0.0.1', 0)
+        async def dial(*args):
+            return await asyncio.open_connection('127.0.0.1', backend.sockets[0].getsockname()[1])
+        async def handle(reader, writer):
+            try:
+                await wa.relay(reader, writer, 'media')
+            finally:
+                finished.set()
+        front = await asyncio.start_server(handle, '127.0.0.1', 0)
+        try:
+            with patch.object(wa, 'connect_socks', dial), patch.object(wa, 'IDLE_TIMEOUT', 0.12):
+                reader, writer = await asyncio.open_connection('127.0.0.1', front.sockets[0].getsockname()[1])
+                try:
+                    self.assertEqual(await asyncio.wait_for(reader.readexactly(8), 1), b'x' * 8)
+                finally:
+                    writer.close(); await writer.wait_closed()
+                    await asyncio.wait_for(finished.wait(), 1)
+        finally:
+            front.close(); backend.close()
+            await front.wait_closed(); await backend.wait_closed()
+
+    async def test_upstream_eof_releases_slot_when_client_does_not_send_fin(self):
+        finished = asyncio.Event()
+        async def backend_handler(reader, writer):
+            writer.write(b'done'); await writer.drain()
+            writer.close(); await writer.wait_closed()
+        backend = await asyncio.start_server(backend_handler, '127.0.0.1', 0)
+        async def dial(*args):
+            return await asyncio.open_connection('127.0.0.1', backend.sockets[0].getsockname()[1])
+        async def handle(reader, writer):
+            try:
+                await wa.relay(reader, writer, 'media')
+            finally:
+                finished.set()
+        front = await asyncio.start_server(handle, '127.0.0.1', 0)
+        try:
+            with patch.object(wa, 'connect_socks', dial):
+                reader, writer = await asyncio.open_connection('127.0.0.1', front.sockets[0].getsockname()[1])
+                try:
+                    self.assertEqual(await asyncio.wait_for(reader.readexactly(4), 1), b'done')
+                    await asyncio.wait_for(finished.wait(), 1.5)
+                finally:
+                    writer.close(); await writer.wait_closed()
+                    await asyncio.wait_for(finished.wait(), 1)
+        finally:
+            front.close(); backend.close()
+            await front.wait_closed(); await backend.wait_closed()
+
     async def test_socks_remote_dns_and_bidirectional_bytes(self):
         received = {}
 

@@ -170,7 +170,9 @@ def collect_once():
             opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
             with opener.open('http://mtproto:8766/status', timeout=5) as response:
                 report = json.load(response)['clientTraffic']
-            store.ingest('relay', report)
+            # The dashboard checks the real WhatsApp listeners from its own
+            # Docker address. Do not report those probes as a LAN client.
+            store.ingest('relay', report, excluded=server_ips)
         except Exception as error:
             errors['relay'] = 'TG/WhatsApp 计数暂不可用（'+type(error).__name__+'）'
         _status.update(lastCollectedAt=datetime.now(ZONE).isoformat(), errors=errors)
