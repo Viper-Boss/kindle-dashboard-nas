@@ -289,9 +289,11 @@ class Worker:
         return backup
 
     def selectors(self, restore=None):
-        script='import proxy_admin,json\np=proxy_admin.api("/proxies")["proxies"]\n'
+        script=('import proxy_admin,json\np=proxy_admin.api("/proxies")["proxies"]\n'
+                'p={k:v for k,v in p.items() if v.get("type")=="Selector" '
+                'and not v.get("hidden") and not k.startswith("__kindle_")}\n')
         if restore is None:
-            script+='print(json.dumps({k:v.get("now") for k,v in p.items() if v.get("type")=="Selector"}))'
+            script+='print(json.dumps({k:v.get("now") for k,v in p.items()}))'
         else:
             script+='saved='+repr(restore)+'\nfor group,node in saved.items():\n if group in p and node in p[group].get("all",[]):proxy_admin.action({"action":"select","group":group,"node":node})\n'
         result=subprocess.run(['docker','exec','-i','kindle-dashboard','python','-'],input=script,capture_output=True,text=True,timeout=45)
