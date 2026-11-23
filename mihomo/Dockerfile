@@ -1,4 +1,4 @@
-FROM golang:1.27-alpine@sha256:d200d2dd76b03a99b52651fd1325aff7dcd35422c35c01bac56571b0507f3deb AS build
+FROM golang:1.27.4-alpine@sha256:70bd7ddea8b6cbe5d6943cde279d6b67feb10cc924fb9100d1d8757c1575b280 AS build
 ARG MIHOMO_COMMIT=3f27ef39f8c96bbfbc8b0b9bb10f5c9ef60149d8
 ARG MIHOMO_SOURCE_SHA256=ecda5f8c8a8a1d60bc088c2640c85d92c8f002c0686234a26bdf671735afe216
 ENV CGO_ENABLED=0 GOTOOLCHAIN=local GOMAXPROCS=2 GOMEMLIMIT=1400MiB
@@ -16,7 +16,7 @@ COPY traffic/client_traffic_test.go tunnel/statistic/client_traffic_kindle_test.
 RUN go run /tmp/patch-traffic.go \
     && go test ./tunnel/statistic -run '^Test(ShortConnectionsAndMidnight|ConcurrentByteAccounting)$'
 RUN go build -tags with_gvisor -trimpath -buildvcs=false \
-       -ldflags '-s -w -X github.com/metacubex/mihomo/constant.Version=v1.19.33-security.3' -o /out/mihomo .
+       -ldflags '-s -w -X github.com/metacubex/mihomo/constant.Version=v1.19.33-security.4' -o /out/mihomo .
 COPY healthcheck.go /tmp/healthcheck.go
 RUN go build -trimpath -o /out/healthcheck /tmp/healthcheck.go
 
